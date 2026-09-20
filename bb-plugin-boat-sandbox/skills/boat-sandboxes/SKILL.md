@@ -50,6 +50,14 @@ can delete the sandbox and its ordinary snapshots. Named templates are not delet
 
 ## Prepared templates and hooks
 
+Before the template hook, preparation enables nested agent sandboxes on Ubuntu
+by setting `kernel.apparmor_restrict_unprivileged_userns=0` inside the Boat
+machine. It persists this in `/etc/sysctl.d/99-bb-boat-userns.conf` and reapplies
+it on every create/resume. Kernels without that setting are unchanged. The
+sandbox user needs non-interactive sudo (or root); failure blocks preparation
+with a specific diagnostic. This keeps inner agent sandboxing enabled while
+using Boat as the outer isolation boundary.
+
 A template may install `~/.config/bb-boat/prepare`, which BB runs after the
 filesystem restore and before enrolling or reconnecting the daemon, and
 `~/.config/bb-boat/before-suspend`, which runs before Boat snapshots. Hook
@@ -119,24 +127,28 @@ original login before lifecycle operations.
 
 ## App previews
 
-For the supported Sofia Rails layout, use `bb boat share` to repair its
-sandbox-local `HOST=0.0.0.0` setting, start its daemons, and return a private
-HTTPS Boat URL for port 3000. It runs only for a Boat-backed thread whose
-workspace has `mise.toml` daemons for `rails`, `js`, and `css`, plus
-`script/dev-start.rb`; other projects fail clearly rather than receiving
-Sofia-specific changes. `--port` overrides 3000. The returned URL contains a
-private access token: do not paste it into shared logs or messages.
+Use `bb boat share --port <port>` to share any running development server.
+Without `--port`, it discovers a Pitchfork daemon (`rails` by default; select
+another with `--daemon`). To start an app when it is not already ready, pass
+`--command`, for example `bb boat share --command 'npm run dev -- --host 0.0.0.0' --port 5173`.
+The command runs in a BB thread terminal, leaving logs available for inspection.
+Sharing does not inspect project layout, edit environment files, or stop daemons.
+Default output is human-readable and withholds the private access token. Use
+`--url` for the tokenized URL alone or `--json` for the full result including it.
+Do not paste either explicit output into shared logs or messages.
 
 Like `bb boat preview`, it opens the app in this thread's browser panel when
 exactly one connected desktop window matches, reusing a tab already on that
 origin instead of adding a duplicate. When zero or several windows match it
-still returns the link and names `--browser-host`/`--browser-instance` for
-choosing one.
+still prepares the route and names `--browser-host`/`--browser-instance` for
+choosing one; use `--url` to retrieve the private link.
 
-Sofia itself must allow Boat's public hostname in development, for example
-`config.hosts << /.*\.on\.ascii\.dev/`; without that repository change Rails
-returns 403 before the application sees the request. The plugin deliberately
-does not edit application host authorization.
+Discovery searches all connected BB machines, not only the thread's Boat
+machine. A successful result identifies the desktop host and instance (the
+`browserTarget` field in JSON). Inspect that host with `bb browser instances
+--host <browser-host>`; the headless Boat machine normally lists no windows.
+`opened`/`reused` means the desktop API completed the tab operation; select the
+thread in that desktop window to see it, including when using BB remotely.
 
 Use `bb boat dev` in a Boat thread to run `mise run dev` in a BB terminal, discover
 Rails' assigned Pitchfork port, privately host it through Boat, and open it in the
@@ -158,3 +170,22 @@ public messages. Coworkers need the URL and the app's own login, not a BB login.
 The minute maintenance sweep also hides owned routes after the app stops listening;
 pre-existing routes are preserved. The dev terminal remains available after an
 error so its logs can be inspected. A sandbox resume requires restarting the app.
+
+### Development settings per project
+
+Set global defaults in Settings → Plugins → Boat Sandboxes:
+`developmentCommand`, `developmentPort`, and `developmentDaemon`.
+`projectDevelopment` stores overrides keyed by BB project ID in the same plugin
+settings; no repository configuration file is required. For example:
+
+```sh
+bb plugin config boat-sandbox set projectDevelopment '{"proj_example":{"command":"npm run dev -- --host 0.0.0.0","port":5173}}'
+```
+
+This replaces the overrides object; preserve other project entries when editing.
+CLI flags override project settings, which override global defaults. Omitted
+project fields inherit; command `""` disables automatic startup by `share`, and
+port `0` selects Pitchfork discovery. `share` starts a missing app only when a
+command is configured or passed explicitly. `preview` never starts an app;
+`dev` uses the configured command, falling back to `mise run dev`.
+Settings are local to this BB installation and are not shared through Git.

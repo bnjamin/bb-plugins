@@ -4,6 +4,7 @@ import { createFakePluginHost, makeHostResponse, makeThreadResponse } from "@get
 import { Boat } from "../boat.js";
 import { previews, parsePreviewArgs } from "../preview.js";
 import { createPlugin } from "../server.js";
+import { configSchema, developmentDefaults } from "../config.js";
 
 const secretUrl = "https://app-3017.on.boat.dev/?_token=private-token";
 const resource = { version: 1, key: "launch1", scope: "personal", accountIdentity: "account1", sandboxId: "bx_test", ttlSeconds: 3600 };
@@ -122,6 +123,38 @@ test("registered CLI accepts explicit thread context and hides private URL by de
   assert.equal(result.exitCode, 0); assert.doesNotMatch(result.stdout!, /private-token/);
 });
 
+test("project development settings inherit defaults and can disable startup and fixed ports", () => {
+  const config = configSchema.parse({ developmentCommand: "npm run dev", developmentPort: 5173,
+    projectDevelopment: JSON.stringify({ project1: { command: "", port: 0, daemon: "web" } }) });
+  assert.deepEqual(developmentDefaults(config, "project1"), { daemon: "web" });
+  assert.deepEqual(developmentDefaults(config, "project2"), { command: "npm run dev", port: 5173, daemon: "rails" });
+  for (const value of ['not json', '{"project1":{"port":65536}}', '{"project1":{"unknown":true}}']) {
+    assert.equal(configSchema.safeParse({ projectDevelopment: value }).success, false);
+  }
+});
+
+test("share uses project settings and lets CLI flags override them", async (t) => {
+  const f = await fixture(); t.after(() => f.harness.lifecycle.dispose());
+  f.harness.sdk.stub("threads.get", async () => makeThreadResponse({ id: "thread1", projectId: "project1", environmentId: "env1" }));
+  await createPlugin(async () => f.boat)(f.bb);
+  await f.harness.behavior.setSettings({ developmentPort: 4000,
+    projectDevelopment: JSON.stringify({ project1: { command: "npm run custom", port: 8080 } }) });
+  f.boat.ready = false;
+  f.harness.sdk.stub("terminals.create", async (input: { start: unknown }) => {
+    assert.deepEqual(input.start, { mode: "command", command: "npm run custom" });
+    f.boat.ready = true;
+    return { id: "term1" };
+  });
+  f.harness.sdk.stub("terminals.get", async () => ({ id: "term1", status: "running" }));
+  const result = await f.harness.behavior.runCli(["share", "--thread", "thread1", "--json"]);
+  assert.equal(result.exitCode, 0);
+  assert.equal(JSON.parse(result.stdout!).port, 8080);
+  const overridden = await f.harness.behavior.runCli(["share", "--thread", "thread1", "--port", "9090", "--json"]);
+  assert.equal(overridden.exitCode, 0);
+  assert.equal(JSON.parse(overridden.stdout!).port, 9090);
+  assert.equal(f.harness.sdk.callsTo("terminals.create").length, 1);
+});
+
 test("Boat preview transport validates protected hostnames and never echoes malformed private responses", async () => {
   for (const data of [
     { url: "https://app-3000.on.boat.dev?_token=secret", isProtected: false },
@@ -152,4 +185,138 @@ test("Boat status discovery parses assigned ports and treats down routes as unow
   assert.equal(await boat.previewPort("bx_test", "/project with spaces", "rails", signal), 3017);
   assert.equal(await boat.hostedPort("bx_test", 3017, signal), false);
   assert.match(requests[0]!, /cd '\/project with spaces'/);
+});
+
+test("share resolves the thread environment, targets its Boat host and opens the private URL in the thread's browser", async (t) => {
+  const f = await fixture();
+  const { harness } = f;
+  await createPlugin(async () => f.boat)(f.bb);
+  t.after(() => harness.lifecycle.dispose());
+  const result = await harness.behavior.runCli(["share", "--thread", "thread1", "--json"]);
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(f.boat.calls, ["host:3017"]);
+  const payload = JSON.parse(result.stdout!);
+  assert.equal(payload.url, secretUrl);
+  assert.equal(payload.browser, "opened");
+  assert.deepEqual(payload.browserTarget, { hostId: "mac", instanceId: "window" });
+  const call = harness.sdk.callsTo("experimental_desktopBrowsers.createTab")[0]!;
+  assert.match(JSON.stringify(call), /thread1/);
+  assert.match(JSON.stringify(call), /_token=private-token/);
+});
+
+test("share accepts an arbitrary app port without project discovery or host RPC", async (t) => {
+  const f = await fixture(); t.after(() => f.harness.lifecycle.dispose());
+  f.boat.previewPort = async () => { throw new Error("must not inspect project tooling"); };
+  await createPlugin(async () => f.boat)(f.bb);
+  const result = await f.harness.behavior.runCli(["share", "--thread", "thread1", "--port", "8080", "--json"]);
+  assert.equal(result.exitCode, 0);
+  assert.equal(JSON.parse(result.stdout!).port, 8080);
+  assert.deepEqual(f.boat.calls, ["host:8080"]);
+  assert.equal(f.harness.inspection.experimental_hostRpcCalls.length, 0);
+  assert.equal(f.harness.sdk.callsTo("terminals.create").length, 0);
+  f.boat.ready = false;
+  const stopped = await f.harness.behavior.runCli(["share", "--thread", "thread1", "--port", "8080"]);
+  assert.equal(stopped.exitCode, 1);
+  assert.equal(f.harness.sdk.callsTo("terminals.create").length, 0);
+});
+
+test("share starts only the explicit app command in a thread terminal", async (t) => {
+  const f = await fixture(); t.after(() => f.harness.lifecycle.dispose());
+  f.boat.ready = false;
+  const command = "python3 -m http.server 8080 --bind 0.0.0.0";
+  f.harness.sdk.stub("terminals.create", async (input: { start: unknown }) => {
+    assert.deepEqual(input.start, { mode: "command", command });
+    f.boat.ready = true;
+    return { id: "term1" };
+  });
+  f.harness.sdk.stub("terminals.get", async () => ({ id: "term1", status: "running" }));
+  await createPlugin(async () => f.boat)(f.bb);
+  const args = ["share", "--thread", "thread1", "--port", "8080", "--command", command, "--json"];
+  const result = await f.harness.behavior.runCli(args);
+  assert.equal(result.exitCode, 0);
+  assert.equal(JSON.parse(result.stdout!).terminalId, "term1");
+  assert.equal((await f.harness.behavior.runCli(args)).exitCode, 0);
+  assert.equal(f.harness.sdk.callsTo("terminals.create").length, 1);
+});
+
+test("share withholds tokens by default and requires explicit URL output", async (t) => {
+  const f = await fixture();
+  const { harness } = f;
+  await createPlugin(async () => f.boat)(f.bb);
+  t.after(() => harness.lifecycle.dispose());
+  const plain = await harness.behavior.runCli(["share", "--thread", "thread1"]);
+  assert.equal(plain.exitCode, 0);
+  assert.match(plain.stdout!, /https:\/\/app-3017.on.boat.dev/);
+  assert.match(plain.stdout!, /withheld/);
+  assert.doesNotMatch(JSON.stringify(plain), /_token|private-token/);
+  const explicit = await harness.behavior.runCli(["share", "--url", "--thread", "thread1"]);
+  assert.equal(explicit.exitCode, 0);
+  assert.equal(explicit.stdout, secretUrl);
+});
+
+test("share reports no target when the selected Boat host has no desktop", async (t) => {
+  const f = await fixture();
+  const { harness } = f;
+  await createPlugin(async () => f.boat)(f.bb);
+  t.after(() => harness.lifecycle.dispose());
+  const payload = JSON.parse((await harness.behavior.runCli(["share", "--thread", "thread1", "--browser-host", "sandbox", "--json"])).stdout!);
+  assert.equal(payload.browser, "unavailable");
+  assert.equal(payload.browserTarget, null);
+  assert.match(payload.message, /0 desktop windows matched/);
+  assert.equal(harness.sdk.callsTo("experimental_desktopBrowsers.createTab").length, 0);
+  const plain = await harness.behavior.runCli(["share", "--thread", "thread1", "--browser-host", "sandbox"]);
+  assert.doesNotMatch(JSON.stringify(plain), /_token|private-token/);
+  assert.match(plain.stdout!, /withheld/);
+});
+
+test("share does not report a browser target when the desktop operation fails", async (t) => {
+  const f = await fixture();
+  const { harness } = f;
+  await createPlugin(async () => f.boat)(f.bb);
+  t.after(() => harness.lifecycle.dispose());
+  harness.sdk.stub("experimental_desktopBrowsers.createTab", async () => { throw new Error("desktop disconnected"); });
+  const payload = JSON.parse((await harness.behavior.runCli(["share", "--thread", "thread1", "--json"])).stdout!);
+  assert.equal(payload.browser, "unavailable");
+  assert.equal(payload.browserTarget, null);
+});
+
+test("share reveals a tab already on the shared origin instead of duplicating it", async (t) => {
+  const f = await fixture();
+  const { harness } = f;
+  await createPlugin(async () => f.boat)(f.bb);
+  t.after(() => harness.lifecycle.dispose());
+  // The app strips the token on redirect, so the open tab no longer carries it.
+  harness.sdk.stub("experimental_desktopBrowsers.listTabs", async () => ({ tabs: [{ tabId: "existing", url: "https://app-3017.on.boat.dev/users/login" }] }));
+  harness.sdk.stub("experimental_desktopBrowsers.revealTab", async () => ({ ok: true }));
+  const payload = JSON.parse((await harness.behavior.runCli(["share", "--thread", "thread1", "--json"])).stdout!);
+  assert.equal(payload.browser, "reused");
+  assert.equal(payload.url, secretUrl);
+  assert.equal(harness.sdk.callsTo("experimental_desktopBrowsers.createTab").length, 0);
+});
+
+test("share still returns the private link when no single desktop window can be chosen", async (t) => {
+  const f = await fixture();
+  const { harness } = f;
+  await createPlugin(async () => f.boat)(f.bb);
+  t.after(() => harness.lifecycle.dispose());
+  harness.sdk.stub("experimental_desktopBrowsers.listInstances", async () => ({ instances: [{ hostId: "mac", instanceId: "one", generation: "current" }, { hostId: "mac", instanceId: "two", generation: "current" }] }));
+  const many = JSON.parse((await harness.behavior.runCli(["share", "--thread", "thread1", "--json"])).stdout!);
+  assert.equal(many.browser, "unavailable");
+  assert.equal(many.url, secretUrl);
+  assert.match(many.message, /--browser-instance/);
+  harness.sdk.stub("hosts.list", async () => { throw new Error("offline"); });
+  const offline = JSON.parse((await harness.behavior.runCli(["share", "--thread", "thread1", "--json"])).stdout!);
+  assert.equal(offline.browser, "unavailable");
+  assert.equal(offline.url, secretUrl);
+  assert.doesNotMatch(offline.message, /--browser-instance/);
+});
+
+test("share passes an explicit desktop window through to the browser lookup", async (t) => {
+  const f = await fixture();
+  const { harness } = f;
+  await createPlugin(async () => f.boat)(f.bb);
+  t.after(() => harness.lifecycle.dispose());
+  const result = await harness.behavior.runCli(["share", "--thread", "thread1", "--browser-host", "mac", "--browser-instance", "window", "--json"]);
+  assert.equal(JSON.parse(result.stdout!).browser, "opened");
+  assert.deepEqual(harness.sdk.callsTo("experimental_desktopBrowsers.listInstances").map(([input]) => (input as { hostId: string }).hostId), ["mac"]);
 });

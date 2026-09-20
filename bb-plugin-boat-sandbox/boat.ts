@@ -20,7 +20,23 @@ export const runningStates = new Set(["ready", "idle", "running"]);
 export const stoppedStates = new Set(["stopped", "archived"]);
 export interface PrepareProgress { step(text: string): void; log(text: string): void }
 const PREPARE_STAGE_MARKER = "BB_BOAT_PREPARE_STAGE=hook";
+const USERNS_STAGE_MARKER = "BB_BOAT_PREPARE_STAGE=userns";
 const PREPARE_TIMING_MARKER = "BB_BOAT_PREPARE_TIMING";
+
+// Boat is the outer isolation boundary. Ubuntu's extra userns restriction
+// prevents agent sandboxes from configuring even their private loopback device.
+// Reapply after restore: snapshots preserve files, not kernel sysctl state.
+export const userNamespacePreparationScript = `
+if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+  bb_boat_userns_command='printf "%s\\n" "kernel.apparmor_restrict_unprivileged_userns=0" > /etc/sysctl.d/99-bb-boat-userns.conf
+sysctl -q -p /etc/sysctl.d/99-bb-boat-userns.conf'
+  if [ "$(id -u)" = 0 ]; then
+    sh -ec "$bb_boat_userns_command"
+  else
+    sudo -n sh -ec "$bb_boat_userns_command"
+  fi
+fi
+`;
 
 export async function resolveCli(configured: string): Promise<string> {
   const candidates = configured
@@ -265,6 +281,8 @@ command -v curl >/dev/null
 command -v git >/dev/null
 node -e 'if (Number(process.versions.node.split(".")[0]) < 22) process.exit(1)'
 bb_boat_hydrated=$(date +%s)
+echo ${USERNS_STAGE_MARKER}
+${userNamespacePreparationScript}
 echo ${PREPARE_STAGE_MARKER}
 hook="$HOME/.config/bb-boat/prepare"
 if [ -f "$hook" ]; then bash "$hook"; fi
@@ -272,10 +290,11 @@ echo "${PREPARE_TIMING_MARKER} filesystem=$(( bb_boat_hydrated - bb_boat_started
 `;
     const result = await this.command(["ssh", id, ["bash", "-s"].map(shellQuote).join(" ")], { stdin: script, timeoutMs: 900_000, signal });
     if (result.exitCode !== 0) {
+      if (result.stdout.includes(PREPARE_STAGE_MARKER)) throw new Error("Boat prepare hook failed. Inspect ~/.config/bb-boat/prepare on the machine; the lifecycle operation was not completed.");
+      if (result.stdout.includes(USERNS_STAGE_MARKER)) throw new Error("Boat user namespace preparation failed. Allow non-interactive sudo to write /etc/sysctl.d/99-bb-boat-userns.conf and apply kernel.apparmor_restrict_unprivileged_userns=0 inside the Boat sandbox.");
       if (/permission denied|operation not permitted|read-only file system/i.test(result.stderr)) {
         throw new Error("Boat SSH was denied access. Verify the BB server can write Boat's CLI state and SSH known_hosts, and can access the sandbox.");
       }
-      if (result.stdout.includes(PREPARE_STAGE_MARKER)) throw new Error("Boat prepare hook failed. Inspect ~/.config/bb-boat/prepare on the machine; the lifecycle operation was not completed.");
       throw new Error("Boat preparation failed. The home filesystem must finish restoring and Node 22+, npm, curl, and git must be installed.");
     }
     const timing = new RegExp(`^${PREPARE_TIMING_MARKER} filesystem=(\\d+) hook=(\\d+)$`, "m").exec(result.stdout);

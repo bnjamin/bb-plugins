@@ -13,7 +13,6 @@
       "icon": "Ship"
     },
     "server": "./server.ts",
-    "host": "./host.ts",
     "skills": [
       "skills"
     ]

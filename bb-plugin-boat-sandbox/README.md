@@ -253,6 +253,12 @@ streamed desktop. Apps must listen on `0.0.0.0` and accept their Boat hostname
 from running `bb boat dev` instead. Port discovery requires mise/Pitchfork; use
 `--port` with other toolchains.
 
+Discovery searches all connected machines, including desktops separate from the
+Boat execution machine. Successful responses include `browserTarget` with the
+desktop host and instance. Use `bb browser instances --host <browser-host>` to
+inspect it; the headless Boat machine normally has no windows. `opened`/`reused`
+reports a completed desktop tab operation, not visibility in a remote web client.
+
 Exactly one connected desktop window is selected automatically. For multiple
 windows, use `--browser-host <id>` and `--browser-instance <id>`; otherwise the
 route is prepared and the command explains how to retrieve its URL. Existing
@@ -260,9 +266,50 @@ preview tabs in the same thread are reused. The thread must be focused for BB to
 reveal its tab. Regular command output omits the token; only `--url` returns it.
 Treat that URL as a private invitation, not a public link to publish.
 
+`bb boat share --port 5173` shares any running development server. Omit the port
+for Pitchfork discovery, or choose a daemon with `--daemon web`. Pass an explicit
+startup command to start an app when needed:
+
+```sh
+bb boat share --command 'npm run dev -- --host 0.0.0.0' --port 5173
+```
+
+The command runs in a BB thread terminal with inspectable logs. Sharing never
+rewrites project configuration or stops its daemons. The app must bind
+`0.0.0.0` and allow its Boat hostname. Plain output withholds the token;
+`bb boat share --url` returns only the private URL, and `--json` returns the
+full result including the tokenized URL and browser target.
+
+On create and resume, Boat preparation sets Ubuntu's
+`kernel.apparmor_restrict_unprivileged_userns=0` before the template hook, so
+agents can use bubblewrap inside the Boat sandbox. It writes
+`/etc/sysctl.d/99-bb-boat-userns.conf` and reapplies it after snapshot restore.
+This requires root or non-interactive sudo; failure blocks preparation with an
+explicit diagnostic. Kernels without this sysctl are unchanged. Boat remains
+the outer isolation boundary, and inner agent sandboxing stays enabled.
+
 The plugin stores only route metadata, never signed URLs. Its minute maintenance
 sweep hides plugin-created routes once their TCP port stops listening. Pre-existing
 routes are preserved, including on `preview-stop`. Unreachable machines are retried
 when they reconnect. Disabling the plugin stops automatic cleanup; remove an
 orphaned route with `boat exec <sandbox> 'host hide <port>'`. A preview belongs to a
 machine and port: threads on the same machine and port share the same application.
+
+### Development settings per project
+
+Set global defaults in Settings → Plugins → Boat Sandboxes:
+`developmentCommand`, `developmentPort`, and `developmentDaemon`.
+`projectDevelopment` stores overrides keyed by BB project ID in the same plugin
+settings; no repository configuration file is required. For example:
+
+```sh
+bb plugin config boat-sandbox set projectDevelopment '{"proj_example":{"command":"npm run dev -- --host 0.0.0.0","port":5173}}'
+```
+
+This replaces the overrides object; preserve other project entries when editing.
+CLI flags override project settings, which override global defaults. Omitted
+project fields inherit; command `""` disables automatic startup by `share`, and
+port `0` selects Pitchfork discovery. `share` starts a missing app only when a
+command is configured or passed explicitly. `preview` never starts an app;
+`dev` uses the configured command, falling back to `mise run dev`.
+Settings are local to this BB installation and are not shared through Git.

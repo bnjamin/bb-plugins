@@ -182,6 +182,9 @@ case "$*" in
 esac
 `, { mode: 0o755 });
   await writeFile(join(bin, "sleep"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  await writeFile(join(bin, "sysctl"), "#!/bin/sh\necho 1\n", { mode: 0o755 });
+  await writeFile(join(bin, "id"), "#!/bin/sh\necho 1000\n", { mode: 0o755 });
+  await writeFile(join(bin, "sudo"), '#!/bin/sh\nprintf "%s\\n" "$*" >> "$HOME/userns-calls"\n', { mode: 0o755 });
   await mkdir(join(root, ".config/bb-boat"), { recursive: true });
   await writeFile(join(root, ".config/bb-boat/prepare"), 'test -f "$HOME/hydrated" && touch "$HOME/database-ready"\n');
   const boat = new Boat("boat", "personal", async (_, __, options) => {
@@ -195,6 +198,10 @@ esac
   const progress: string[] = [];
   const report = { step: (text: string) => progress.push(`step:${text}`), log: (text: string) => progress.push(`log:${text}`) };
   await boat.prepare("bx_test", signal(), report);
+  const usernsCalls = await readFile(join(root, "userns-calls"), "utf8");
+  assert.match(usernsCalls, /-n sh -ec/);
+  assert.match(usernsCalls, /kernel.apparmor_restrict_unprivileged_userns=0/);
+  assert.match(usernsCalls, /sysctl -q -p \/etc\/sysctl.d\/99-bb-boat-userns.conf/);
   const calls = (await readFile(join(root, "findmnt-calls"), "utf8")).trim().split("\n");
   assert.equal(calls.length, 2, "must observe lazyfs and then wait until it is replaced");
   assert.ok(calls.every((call) => call.includes("SOURCE")));
@@ -203,6 +210,11 @@ esac
   assert.equal(progress[0], "step:Waiting for the Boat filesystem and checking tools");
   assert.match(progress[1]!, /^log:Boat filesystem ready after \d+s; template prepare hook took \d+s\.\n$/);
   assert.equal(progress.length, 2);
+  await writeFile(join(bin, "sudo"), '#!/bin/sh\necho "Operation not permitted" >&2\nexit 1\n', { mode: 0o755 });
+  await assert.rejects(boat.prepare("bx_test", signal()), /Boat user namespace preparation failed/);
+  // Kernels without Ubuntu's restriction need no elevated command.
+  await writeFile(join(bin, "sysctl"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  await boat.prepare("bx_test", signal());
   await writeFile(join(root, ".config/bb-boat/prepare"), "echo private-hook-output\nexit 1\n");
   await assert.rejects(boat.prepare("bx_test", signal()), (error: Error) => {
     assert.match(error.message, /Boat prepare hook failed/);
