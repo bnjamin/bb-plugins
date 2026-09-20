@@ -38,7 +38,25 @@ export function lifecycle(bb: BbPluginApi, config: () => Promise<Config>, client
     const prepareMs = Date.now() - prepareStartedAt;
     report.step("Connecting the BB daemon");
     const bootstrapStartedAt = Date.now();
-    const { hostId } = await bb.experimental_machines.bootstrap({ key: resource.key, executor: boat.executor(resource.sandboxId), report, signal });
+    // BB's installer prints one marked line per step (○ active, ✓ done, ! warning,
+    // ✗ failed). Mirror those with elapsed seconds into the plugin log so a slow
+    // enrollment can be attributed to download, install or join afterwards.
+    const installerLine = /^\s*[○✓!✗]\s+(.+)$/u;
+    let pending = "";
+    const bootstrapReport: MachineBootstrapRequest["report"] = {
+      step: (text) => report.step(text),
+      log: (text) => {
+        report.log(text);
+        pending += text;
+        let index: number;
+        while ((index = pending.indexOf("\n")) !== -1) {
+          const match = installerLine.exec(pending.slice(0, index));
+          pending = pending.slice(index + 1);
+          if (match) bb.log.info(`Daemon bootstrap +${seconds(Date.now() - bootstrapStartedAt)}: ${match[1]}. Sandbox ${resource.sandboxId}.`);
+        }
+      },
+    };
+    const { hostId } = await bb.experimental_machines.bootstrap({ key: resource.key, executor: boat.executor(resource.sandboxId), report: bootstrapReport, signal });
     await kv.set(idleKey(hostId), Date.now());
     return { hostId, prepareMs, bootstrapMs: Date.now() - bootstrapStartedAt };
   }
