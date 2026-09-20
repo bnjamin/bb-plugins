@@ -192,3 +192,6 @@ exercised by core on the first thread start and was not part of this run.
 - Reloaded the plugin and shared an existing application on port 3000 without
   restarting it. The generic Boat route opened successfully and repeat sharing
   reused its tab.
+- HTTP validation of the new `*.on.boat.dev` route returned 403 from the
+  application's host allowlist. The plugin does not change app host authorization;
+  apps must permit the Boat hostname as documented.
