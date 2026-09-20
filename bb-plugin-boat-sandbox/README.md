@@ -9,7 +9,14 @@ Modal sandbox provider.
 - Idle sleep, runtime lease renewal and reconciliation after Boat auto-stop.
 - Durable early allocation tracking, original billing scope, account checks and explicit recovery
   when a create response is lost.
-- Settings UI, `bb boat` diagnostics and an agent skill. No custom frontend needed.
+- Settings UI, a **Share app** sidebar action, `bb boat` diagnostics and an agent skill.
+
+In a Boat thread, click **+** in the right sidebar, then **Share app**. This uses
+your project’s development settings to start the app if needed, creates or reuses
+its protected Boat preview, and opens it using your current client’s browser
+preference. The panel shows progress and retry controls. Restoring a panel after
+a reload does not start development automatically. Configure the development
+command and port in **Settings → Plugins → Boat Sandboxes**.
 
 ## Install
 

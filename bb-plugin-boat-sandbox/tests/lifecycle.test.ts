@@ -149,7 +149,9 @@ test("external auto-stop is reconciled through core without extending stopped co
 });
 
 test("package uses only public BB APIs", async () => {
-  const scan = await experimental_scanPublicSdkOnly(fileURLToPath(new URL("..", import.meta.url)));
+  const scan = await experimental_scanPublicSdkOnly(fileURLToPath(new URL("..", import.meta.url)), {
+    allow: [/^react$/, /^jsdom$/, /^@testing-library\/react$/],
+  });
   assert.deepEqual(scan.violations, []);
   assert.deepEqual(scan.privateDependencies, []);
 });

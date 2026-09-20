@@ -1,4 +1,5 @@
 import { previews, parsePreviewArgs } from "./preview.js";
+import { shareContract } from "./share-rpc.js";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { Boat, resolveCli, stoppedStates } from "./boat.js";
 import { configSchema, settingsDescriptors, developmentDefaults, providerId, resourceSchema } from "./config.js";
@@ -12,6 +13,15 @@ export function createPlugin(factory?: BoatFactory) {
     bb.onDispose(() => lifetime.abort());
     const client: BoatFactory = factory ?? (async (scope) => new Boat(await resolveCli((await config()).cliPath), scope));
     const preview = previews(bb, client, lifetime.signal);
+    bb.rpc.register(shareContract, {
+      async share({ threadId }) {
+        const thread = await bb.sdk.threads.get({ threadId });
+        const defaults = developmentDefaults(await config(), thread.projectId);
+        // The calling client opens its own browser; do not pick a server-side desktop.
+        const result = await preview.open({ ...defaults, threadId, start: Boolean(defaults.command), includeUrl: true }, lifetime.signal, false);
+        return { url: result.url!, origin: result.origin };
+      },
+    });
     const machines = lifecycle(bb, config, client, lifetime.signal);
     bb.experimental_machines.register(machines.definition);
     bb.experimental_environments.register({

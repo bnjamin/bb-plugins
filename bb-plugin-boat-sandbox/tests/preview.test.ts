@@ -320,3 +320,17 @@ test("share passes an explicit desktop window through to the browser lookup", as
   assert.equal(JSON.parse(result.stdout!).browser, "opened");
   assert.deepEqual(harness.sdk.callsTo("experimental_desktopBrowsers.listInstances").map(([input]) => (input as { hostId: string }).hostId), ["mac"]);
 });
+
+test("UI sharing respects project defaults without opening a server-side desktop or storing tokens", async (t) => {
+  const f = await fixture(); t.after(() => f.harness.lifecycle.dispose());
+  f.harness.sdk.stub("threads.get", async () => makeThreadResponse({ id: "thread1", projectId: "project1", environmentId: "env1" }));
+  await createPlugin(async () => f.boat)(f.bb);
+  await f.harness.behavior.setSettings({ developmentPort: 4000, projectDevelopment: JSON.stringify({ project1: { port: 8080 } }) });
+  assert.deepEqual(await f.harness.behavior.callRpc("share", { threadId: "thread1" }), { url: secretUrl, origin: "https://app-3017.on.boat.dev" });
+  assert.deepEqual(f.boat.calls, ["host:8080"]);
+  assert.equal(f.harness.sdk.callsTo("experimental_desktopBrowsers.listInstances").length, 0);
+  assert.equal(f.harness.sdk.callsTo("experimental_desktopBrowsers.createTab").length, 0);
+  for (const key of await f.bb.storage.kv.list()) assert.doesNotMatch(JSON.stringify(await f.bb.storage.kv.get(key)), /private-token/);
+  f.host.machineProviderId = "other";
+  await assert.rejects(f.harness.behavior.callRpc("share", { threadId: "thread1" }), /not on a Boat/);
+});

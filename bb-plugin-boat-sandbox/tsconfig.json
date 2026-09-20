@@ -1,6 +1,7 @@
 {
   "compilerOptions": {
     "strict": true,
+    "jsx": "react-jsx",
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
@@ -16,6 +17,7 @@
   },
   "include": [
     "*.ts",
+    "*.tsx",
     "tests",
     "scripts"
   ]

@@ -195,3 +195,19 @@ exercised by core on the first thread start and was not part of this run.
 - HTTP validation of the new `*.on.boat.dev` route returned 403 from the
   application's host allowlist. The plugin does not change app host authorization;
   apps must permit the Boat hostname as documented.
+
+## Sidebar Share app action
+
+- Added **Share app** to the thread right-panel plus menu using the public
+  `threadPanelAction` slot. It calls the configured preview flow through typed
+  RPC, then opens the URL using the current client's browser preference.
+- SDK frontend tests cover pending-click deduplication, remounts, idle restored
+  panels, retries, and a link fallback when browser navigation is declined.
+  Server tests verify project overrides, rejection of non-Boat machines, no
+  desktop targeting, and no token persistence.
+- All 47 tests, typecheck, and build passed; the installed plugin was reloaded.
+- Reproduced a missing app after sandbox resume, configured project startup,
+  and verified both CLI sharing and the panel's RPC succeeded. Known failures
+  now show specific guidance without exposing raw transport errors or tokens.
+- Live visual verification was unavailable: the computer-use tool denied access
+  to the BB application. No existing application preview was stopped.

@@ -54,7 +54,7 @@ export function previews(bb: BbPluginApi, client: BoatFactory, lifetime: AbortSi
     return { environment: { ...environment, path: environment.path }, host, resource, boat: await ownedClient(client, resource, signal) };
   }
 
-  async function open(input: PreviewOptions, caller?: AbortSignal) {
+  async function open(input: PreviewOptions, caller?: AbortSignal, reveal = true) {
     const options = previewOptions.parse(input);
     const signal = AbortSignal.any([lifetime, ...(caller ? [caller] : []), AbortSignal.timeout(120_000)]);
     const { environment, host, resource, boat } = await target(options.threadId, signal);
@@ -98,7 +98,9 @@ export function previews(bb: BbPluginApi, client: BoatFactory, lifetime: AbortSi
       await bb.storage.kv.set(key, record);
       const url = await boat.hostPreview(resource.sandboxId, port, signal);
       await bb.storage.kv.set(idleKey(host.id), Date.now());
-      const { browser, matched, browserTarget } = await revealUrl(bb, url, options);
+      const { browser, matched, browserTarget } = reveal
+        ? await revealUrl(bb, url, options)
+        : { browser: "unavailable" as const, matched: null, browserTarget: null };
       const message = browser !== "unavailable"
         ? `Preview tab ${browser} on host ${browserTarget!.hostId}, instance ${browserTarget!.instanceId}. Select the thread in that desktop window to see it. Inspect with bb browser instances --host ${browserTarget!.hostId}.`
         : matched === null
