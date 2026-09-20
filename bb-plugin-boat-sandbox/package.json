@@ -1,0 +1,39 @@
+{
+  "name": "bb-plugin-boat-sandbox",
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "bb": ">=0.43",
+    "bbPluginSdk": ">=0.4.104"
+  },
+  "bb": {
+    "name": "Boat Sandboxes",
+    "description": "Reusable Boat.dev machines with BB enrollment and snapshot-backed sleep.",
+    "branding": {
+      "icon": "Ship"
+    },
+    "server": "./server.ts",
+    "skills": [
+      "skills"
+    ]
+  },
+  "dependencies": {
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.4.104",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.3.0",
+    "better-sqlite3": "^12.0.0",
+    "cron-parser": "^5.10.1",
+    "hono": "^4.13.8",
+    "tsx": "^4.20.0",
+    "typescript": "^5.7.0"
+  },
+  "scripts": {
+    "build": "bb plugin build",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts"
+  }
+}

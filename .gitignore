@@ -1,0 +1,4 @@
+node_modules/
+dist/
+.smoke-resource.json
+.DS_Store
