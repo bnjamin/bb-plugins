@@ -98,8 +98,10 @@ a reusable template, or copy desktop credential files without authorization.
 ## Uncertain creation
 
 Boat has no create idempotency key. The plugin stores allocation intent before
-creating and checkpoints the first returned sandbox ID. After a lost response,
-it blocks retries from allocating another sandbox.
+creating and checkpoints the first returned sandbox ID. After a lost create
+response it first searches for a new sandbox whose `BB_BOAT_ALLOCATION_KEY`
+marker matches and adopts it; only if none exists does it block retries from
+allocating another sandbox.
 
 Run `bb boat allocations --json`, then `boat --org <saved-scope> list --all`.
 For a suspected running sandbox, `bb boat recover <allocation-key> <sandbox-id>`

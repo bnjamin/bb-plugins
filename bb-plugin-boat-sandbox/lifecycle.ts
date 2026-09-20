@@ -32,7 +32,9 @@ export function lifecycle(bb: BbPluginApi, config: () => Promise<Config>, client
   async function connect(resource: Resource, report: MachineBootstrapRequest["report"], signal: AbortSignal, verified?: Boat) {
     const boat = verified ?? await ownedClient(client, resource, signal);
     const prepareStartedAt = Date.now();
-    await boat.prepare(resource.sandboxId, signal, report);
+    // Mirror the guard/hook split into the plugin log so launches can be
+    // compared from `bb plugin logs` without opening each transcript.
+    await boat.prepare(resource.sandboxId, signal, { step: (text) => report.step(text), log: (text) => { report.log(text); bb.log.info(`${text.trim()} Sandbox ${resource.sandboxId}.`); } });
     const prepareMs = Date.now() - prepareStartedAt;
     report.step("Connecting the BB daemon");
     const bootstrapStartedAt = Date.now();

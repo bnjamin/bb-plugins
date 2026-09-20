@@ -128,7 +128,35 @@ Changes in this revision, all covered by typecheck and the test suite:
   adoption at the default path, and the installer's 304 shortcut for a
   pre-installed `bb-app` with its recorded digest.
 
-Expected effect, to be confirmed with the new timing line once a template built
-that way is in use: the clone (~15 s), most of bootstrap (~12 s of 17 s) and any
+Expected effect: the clone (~15 s), most of bootstrap (~12 s of 17 s) and any
 synchronous service wait leave the launch path. Boat hydration of the snapshot
 remains the largest and most variable step.
+
+### Live result with a template built that way (2026-09-20)
+
+`bb machine create --provider boat-sandbox` against a 3.9 GB template carrying
+the checkout, finished setup, hooks and pre-installed `bb-app`:
+
+| Stage | Before | After |
+| --- | ---: | ---: |
+| preflight | 1.0 | 0.5 |
+| sandbox (`boat new` until ready) | 8.7 | 73.6 |
+| prepare (filesystem guard + hook) | 51.4 | 17.3 |
+| daemon (bootstrap + join) | 17.0 | 8.3 |
+| **machine ready** | **78** | **99.6** |
+
+On the machine, the checkout sat at BB's default path with the project's origin,
+clean and already at `origin/master`; the database had come up in the background;
+the artifact digest was recorded. Every launch-path change worked as intended.
+
+The sandbox stage regressed for a reason outside the plugin: Boat's create API
+was slow all day. Its CLI timed out client-side (~30 s, "could not reach the
+Boat API … operation timed out") on three of four creates, while Boat still
+created each sandbox within a second of the request. Snapshot size was not the
+cause (3.91 GB vs 3.82 GB; the old template timed out the same way). The plugin
+now handles this: after a create fails without an ID it lists new sandboxes,
+verifies the `BB_BOAT_ALLOCATION_KEY` marker over `boat exec`, and adopts the
+match instead of leaving an uncertain allocation. One earlier launch before that
+change did end uncertain and was reconciled with `bb boat recover` and
+`bb machine retry-cleanup`; no sandbox leaked. Thread-level checkout adoption is
+exercised by core on the first thread start and was not part of this run.

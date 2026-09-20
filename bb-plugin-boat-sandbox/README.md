@@ -170,8 +170,13 @@ bb boat allocations --json
 
 Boat offers no create idempotency key. An allocation intent is persisted before
 creation, and the first JSONL `created` ID is saved before enrollment. A retry
-reuses that ID. An unknown ID blocks further allocation and cleanup rather than
-silently leaking another machine. See [the agent skill](skills/boat-sandboxes/SKILL.md#uncertain-creation)
+reuses that ID. Every sandbox is created with a `BB_BOAT_ALLOCATION_KEY`
+environment marker; when Boat's create call fails without returning an ID (its
+CLI has been seen to time out client-side while the sandbox was still created),
+the plugin looks for the single new sandbox carrying this key, verifies the
+marker, and adopts it. Only when that finds nothing does the allocation stay
+uncertain, blocking further allocation and cleanup rather than silently leaking
+another machine. See [the agent skill](skills/boat-sandboxes/SKILL.md#uncertain-creation)
 for verified recovery and clearing resolved pending allocations.
 
 The plugin only returns allowlisted sandbox fields; desktop access URLs, account

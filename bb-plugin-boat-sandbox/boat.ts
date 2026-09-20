@@ -127,8 +127,11 @@ export class Boat {
   }
   async create(config: Config, key: string, signal: AbortSignal, onAllocated: (id: string) => Promise<void>): Promise<string> {
     let id: string | undefined;
+    // Clock skew margin for matching createdAt against the local start time.
+    const since = new Date(Date.now() - 60_000).toISOString();
     const args = ["new", "--environment", config.environment, "--type", config.machineType, "--ttl", String(config.ttlSeconds), "--env", `BB_BOAT_ALLOCATION_KEY=${key}`];
     if (config.snapshot) args.push(`--from`, config.snapshot);
+    let failure: unknown;
     try {
       await this.checked(args, { signal, timeoutMs: 900_000, onLine: async (line) => {
         const event = z.object({ event: z.string(), id: z.string().regex(/^bx_[A-Za-z0-9]+$/).optional() }).passthrough().parse(JSON.parse(line));
@@ -139,11 +142,38 @@ export class Boat {
         }
       } });
     } catch (error) {
-      if (!(error instanceof BoatCommandError && error.readinessFailed && id)) throw error;
+      if (id && !(error instanceof BoatCommandError && error.readinessFailed)) throw error;
+      failure = error;
     }
-    if (!id) throw new Error("Boat did not return a sandbox ID. Allocation remains pending for manual reconciliation.");
+    if (!id) {
+      // Boat's create call has timed out client-side while the sandbox was
+      // still created. The per-sandbox allocation marker identifies it; adopt
+      // it rather than leaving an uncertain allocation for manual recovery.
+      id = await this.findAllocated(key, since, signal);
+      if (!id) throw failure ?? new Error("Boat did not return a sandbox ID. Allocation remains pending for manual reconciliation.");
+      await onAllocated(id);
+    }
     await this.waitFor(id, runningStates, signal);
     return id;
+  }
+  private async findAllocated(key: string, since: string, signal: AbortSignal): Promise<string | undefined> {
+    const listSchema = z.object({ sandboxes: z.array(z.object({ id: z.string(), state: z.string(), createdAt: z.string().nullable().optional() }).passthrough()) });
+    const deadline = Date.now() + 180_000;
+    while (Date.now() < deadline) {
+      let candidates: { id: string; state: string }[] = [];
+      try {
+        candidates = listSchema.parse(await this.json(["list", "--all"], signal)).sandboxes
+          .filter((sandbox) => (sandbox.createdAt ?? "") >= since && !stoppedStates.has(sandbox.state) && !["error", "deleted"].includes(sandbox.state));
+      } catch { /* Transient listing failure; retry below. */ }
+      if (candidates.length === 0) return undefined;
+      for (const candidate of candidates) {
+        if (!runningStates.has(candidate.state)) continue;
+        try { if (await this.allocationKey(candidate.id, signal) === key) return candidate.id; }
+        catch { /* Not ours, or not accepting commands yet. */ }
+      }
+      await delay(5000, undefined, { signal });
+    }
+    return undefined;
   }
   async waitFor(id: string, states: Set<string>, signal: AbortSignal): Promise<Sandbox> {
     const deadline = Date.now() + 900_000;

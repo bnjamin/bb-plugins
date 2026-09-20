@@ -28,6 +28,34 @@ test("allocation is saved on the first created event, including readiness failur
   assert.deepEqual(await boat.info("bx_test", signal()), { id: "bx_test", state: "ready" });
 });
 
+test("a lost create response adopts the one new sandbox carrying this allocation key", async () => {
+  const saved: string[] = [];
+  const operations: string[] = [];
+  const recent = new Date().toISOString();
+  const old = new Date(Date.now() - 3_600_000).toISOString();
+  const boat = new Boat("boat", "personal", async (_, args) => {
+    operations.push(args[4]!);
+    switch (args[4]) {
+      case "new": return { exitCode: 1, stdout: '{"event":"error","error":"could not reach the Boat API: operation timed out"}', stderr: "" };
+      case "list": return ok({ sandboxes: [
+        { id: "bx_old", state: "ready", createdAt: old },
+        { id: "bx_other", state: "ready", createdAt: recent },
+        { id: "bx_mine", state: "ready", createdAt: recent },
+      ] });
+      case "exec": return ok({ exitCode: 0, stdout: args[5] === "bx_mine" ? "launch1\n" : "someone-else\n" });
+      default: return ok({ sandbox: { id: args[5], state: "ready" } });
+    }
+  });
+  assert.equal(await boat.create(configSchema.parse({}), "launch1", signal(), async (id) => { saved.push(id); }), "bx_mine");
+  assert.deepEqual(saved, ["bx_mine"]);
+  assert.ok(!operations.includes("delete"));
+  // Nothing new appeared: the original failure is reported and nothing is adopted.
+  const none = new Boat("boat", "personal", async (_, args) => args[4] === "new"
+    ? { exitCode: 1, stdout: '{"event":"error","error":"operation timed out"}', stderr: "" }
+    : ok({ sandboxes: [{ id: "bx_old", state: "ready", createdAt: old }] }));
+  await assert.rejects(none.create(configSchema.parse({}), "launch1", signal(), async () => { throw new Error("must not allocate"); }), BoatCommandError);
+});
+
 test("failure after allocation remains a failure and does not expose raw output", async () => {
   let saved = false;
   const boat = new Boat("boat", "personal", async (_, __, options) => {
