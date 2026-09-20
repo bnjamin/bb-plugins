@@ -160,3 +160,23 @@ match instead of leaving an uncertain allocation. One earlier launch before that
 change did end uncertain and was reconciled with `bb boat recover` and
 `bb machine retry-cleanup`; no sandbox leaked. Thread-level checkout adoption is
 exercised by core on the first thread start and was not part of this run.
+
+## Share test-drive fixes (2026-09-20)
+
+- Plain `bb boat share` on the existing Sofia Boat thread returned only the
+  origin, token-withheld guidance, and the actual desktop host/instance.
+- Explicit JSON retained the private URL. An in-memory cookie-jar request
+  followed its authorization redirect and received HTTP 200 with the Sofia
+  login title and CSRF metadata. No token was printed or saved in this report.
+- The browser operation reported `reused` on the Mac desktop. That host's
+  `bb browser instances` listed the same instance; the Boat machine listed none.
+- Before repair, `bwrap --unshare-net --dev-bind / / true` failed with
+  `Failed RTM_NEWADDR: Operation not permitted` and Ubuntu's userns sysctl was 1.
+  Applying the plugin's preparation script changed it to 0 and both the
+  network-namespace and user-namespace bubblewrap checks exited successfully.
+- The repair writes `/etc/sysctl.d/99-bb-boat-userns.conf` inside Boat. The plugin
+  also runs it before the template hook on every create/resume, so old named
+  templates benefit without being rebuilt from an enrolled machine.
+- The existing Sofia preview remains available. No stop, suspend, or template
+  replacement was performed. A full sleep/wake was not exercised in this run.
+- All 44 tests, TypeScript checking, and the plugin build passed.

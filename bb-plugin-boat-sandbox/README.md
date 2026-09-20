@@ -253,12 +253,31 @@ streamed desktop. Apps must listen on `0.0.0.0` and accept their Boat hostname
 from running `bb boat dev` instead. Port discovery requires mise/Pitchfork; use
 `--port` with other toolchains.
 
+Discovery searches all connected machines, including desktops separate from the
+Boat execution machine. Successful responses include `browserTarget` with the
+desktop host and instance. Use `bb browser instances --host <browser-host>` to
+inspect it; the headless Boat machine normally has no windows. `opened`/`reused`
+reports a completed desktop tab operation, not visibility in a remote web client.
+
 Exactly one connected desktop window is selected automatically. For multiple
 windows, use `--browser-host <id>` and `--browser-instance <id>`; otherwise the
 route is prepared and the command explains how to retrieve its URL. Existing
 preview tabs in the same thread are reused. The thread must be focused for BB to
 reveal its tab. Regular command output omits the token; only `--url` returns it.
 Treat that URL as a private invitation, not a public link to publish.
+
+For Sofia's supported layout, `bb boat share` repairs the sandbox-local bind
+address, starts the app, and opens its private preview. Plain output withholds
+the token; `bb boat share --url` returns only the private URL, and `--json`
+returns the full result including the tokenized URL and browser target.
+
+On create and resume, Boat preparation sets Ubuntu's
+`kernel.apparmor_restrict_unprivileged_userns=0` before the template hook, so
+agents can use bubblewrap inside the Boat sandbox. It writes
+`/etc/sysctl.d/99-bb-boat-userns.conf` and reapplies it after snapshot restore.
+This requires root or non-interactive sudo; failure blocks preparation with an
+explicit diagnostic. Kernels without this sysctl are unchanged. Boat remains
+the outer isolation boundary, and inner agent sandboxing stays enabled.
 
 The plugin stores only route metadata, never signed URLs. Its minute maintenance
 sweep hides plugin-created routes once their TCP port stops listening. Pre-existing

@@ -98,13 +98,13 @@ export function previews(bb: BbPluginApi, client: BoatFactory, lifetime: AbortSi
       await bb.storage.kv.set(key, record);
       const url = await boat.hostPreview(resource.sandboxId, port, signal);
       await bb.storage.kv.set(idleKey(host.id), Date.now());
-      const { browser, matched } = await revealUrl(bb, url, options);
+      const { browser, matched, browserTarget } = await revealUrl(bb, url, options);
       const message = browser !== "unavailable"
-        ? "Preview ready in this thread's browser panel. Select the thread to see it."
+        ? `Preview tab ${browser} on host ${browserTarget!.hostId}, instance ${browserTarget!.instanceId}. Select the thread in that desktop window to see it. Inspect with bb browser instances --host ${browserTarget!.hostId}.`
         : matched === null
           ? "Preview ready, but BB could not open its browser. Use --url to retrieve the private link."
           : `Preview ready; ${matched} desktop windows matched. Select one with --browser-host/--browser-instance or retrieve the private link with --url.`;
-      return { hostId: host.id, port, origin: new URL(url).origin, browser, terminalId: record.terminalId, message, ...(options.includeUrl ? { url } : {}) };
+      return { hostId: host.id, port, origin: new URL(url).origin, browser, browserTarget, terminalId: record.terminalId, message, ...(options.includeUrl ? { url } : {}) };
     } finally { busy.delete(environment.id); }
   }
 

@@ -50,6 +50,14 @@ can delete the sandbox and its ordinary snapshots. Named templates are not delet
 
 ## Prepared templates and hooks
 
+Before the template hook, preparation enables nested agent sandboxes on Ubuntu
+by setting `kernel.apparmor_restrict_unprivileged_userns=0` inside the Boat
+machine. It persists this in `/etc/sysctl.d/99-bb-boat-userns.conf` and reapplies
+it on every create/resume. Kernels without that setting are unchanged. The
+sandbox user needs non-interactive sudo (or root); failure blocks preparation
+with a specific diagnostic. This keeps inner agent sandboxing enabled while
+using Boat as the outer isolation boundary.
+
 A template may install `~/.config/bb-boat/prepare`, which BB runs after the
 filesystem restore and before enrolling or reconnecting the daemon, and
 `~/.config/bb-boat/before-suspend`, which runs before Boat snapshots. Hook
@@ -124,14 +132,23 @@ sandbox-local `HOST=0.0.0.0` setting, start its daemons, and return a private
 HTTPS Boat URL for port 3000. It runs only for a Boat-backed thread whose
 workspace has `mise.toml` daemons for `rails`, `js`, and `css`, plus
 `script/dev-start.rb`; other projects fail clearly rather than receiving
-Sofia-specific changes. `--port` overrides 3000. The returned URL contains a
-private access token: do not paste it into shared logs or messages.
+Sofia-specific changes. `--port` overrides 3000. Default output is human-readable
+and shows only the origin, withholding the private access token. Use `--url` for
+the tokenized URL alone or `--json` for the full result including that URL. Do
+not paste either explicit output into shared logs or messages.
 
 Like `bb boat preview`, it opens the app in this thread's browser panel when
 exactly one connected desktop window matches, reusing a tab already on that
 origin instead of adding a duplicate. When zero or several windows match it
-still returns the link and names `--browser-host`/`--browser-instance` for
-choosing one.
+still prepares the route and names `--browser-host`/`--browser-instance` for
+choosing one; use `--url` to retrieve the private link.
+
+Discovery searches all connected BB machines, not only the thread's Boat
+machine. A successful result identifies the desktop host and instance (the
+`browserTarget` field in JSON). Inspect that host with `bb browser instances
+--host <browser-host>`; the headless Boat machine normally lists no windows.
+`opened`/`reused` means the desktop API completed the tab operation; select the
+thread in that desktop window to see it, including when using BB remotely.
 
 Sofia itself must allow Boat's public hostname in development, for example
 `config.hosts << /.*\.on\.ascii\.dev/`; without that repository change Rails

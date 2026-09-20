@@ -168,9 +168,45 @@ test("share resolves the thread environment, targets its Boat host and opens the
   const payload = JSON.parse(result.stdout!);
   assert.equal(payload.url, sharedUrl);
   assert.equal(payload.browser, "opened");
+  assert.deepEqual(payload.browserTarget, { hostId: "mac", instanceId: "window" });
   const call = harness.sdk.callsTo("experimental_desktopBrowsers.createTab")[0]!;
   assert.match(JSON.stringify(call), /thread1/);
   assert.match(JSON.stringify(call), /_token=secret/);
+});
+
+test("share withholds tokens by default and requires explicit URL output", async (t) => {
+  const { harness } = await shareFixture();
+  t.after(() => harness.lifecycle.dispose());
+  const plain = await harness.behavior.runCli(["share", "--thread", "thread1"]);
+  assert.equal(plain.exitCode, 0);
+  assert.match(plain.stdout!, /https:\/\/sofia.on.boat.dev/);
+  assert.match(plain.stdout!, /withheld/);
+  assert.doesNotMatch(JSON.stringify(plain), /_token|secret/);
+  const explicit = await harness.behavior.runCli(["share", "--url", "--thread", "thread1"]);
+  assert.equal(explicit.exitCode, 0);
+  assert.equal(explicit.stdout, sharedUrl);
+});
+
+test("share reports no target when the selected Boat host has no desktop", async (t) => {
+  const { harness } = await shareFixture();
+  t.after(() => harness.lifecycle.dispose());
+  const payload = JSON.parse((await harness.behavior.runCli(["share", "--thread", "thread1", "--browser-host", "sandbox", "--json"])).stdout!);
+  assert.equal(payload.browser, "unavailable");
+  assert.equal(payload.browserTarget, null);
+  assert.match(payload.message, /0 desktop windows matched/);
+  assert.equal(harness.sdk.callsTo("experimental_desktopBrowsers.createTab").length, 0);
+  const plain = await harness.behavior.runCli(["share", "--thread", "thread1", "--browser-host", "sandbox"]);
+  assert.doesNotMatch(JSON.stringify(plain), /_token|secret/);
+  assert.match(plain.stdout!, /withheld/);
+});
+
+test("share does not report a browser target when the desktop operation fails", async (t) => {
+  const { harness } = await shareFixture();
+  t.after(() => harness.lifecycle.dispose());
+  harness.sdk.stub("experimental_desktopBrowsers.createTab", async () => { throw new Error("desktop disconnected"); });
+  const payload = JSON.parse((await harness.behavior.runCli(["share", "--thread", "thread1", "--json"])).stdout!);
+  assert.equal(payload.browser, "unavailable");
+  assert.equal(payload.browserTarget, null);
 });
 
 test("share reveals a tab already on the shared origin instead of duplicating it", async (t) => {
