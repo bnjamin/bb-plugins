@@ -123,6 +123,15 @@ Start services from the prepare hook detached, and give agents a wait command.
 `~/.bb-machines/<server-host>/AGENTS.md` is appended to every thread's system
 prompt on that machine, so it is the place to explain those commands.
 
+Boat injects an environment's variables (for example `CLAUDE_CODE_OAUTH_TOKEN`
+from its agent credentials) into SSH sessions, but BB's daemon runs as a systemd
+user service and inherits the user manager's environment, which has none of
+them, so agents start logged out. Either store the credential in BB with
+`bb machine env set NAME` (encrypted, synced into every daemon), or have the
+prepare hook run `systemctl --user import-environment NAME…` for the variables
+that are set; the hook runs in an SSH session before the daemon starts on both
+creation and wake.
+
 ### Launch timing
 
 Each create and resume writes one summary line to the provisioning transcript
