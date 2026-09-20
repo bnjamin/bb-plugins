@@ -23,8 +23,8 @@ const recordSchema = z.object({
 });
 const previewKey = (hostId: string, port: number) => `preview/${createHash("sha256").update(`${hostId}:${port}`).digest("hex")}`;
 
-export function parsePreviewArgs(args: string[], threadId?: string, start = false): PreviewOptions {
-  const values: Record<string, unknown> = { threadId, start };
+export function parsePreviewArgs(args: string[], threadId?: string, start = false, defaults: Partial<PreviewOptions> = {}): PreviewOptions {
+  const values: Record<string, unknown> = { ...defaults, threadId, start };
   const flags: Record<string, string> = { "--thread": "threadId", "--port": "port", "--daemon": "daemon", "--command": "command", "--browser-host": "browserHost", "--browser-instance": "browserInstance" };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;

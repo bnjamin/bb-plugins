@@ -1,10 +1,8 @@
 import { previews, parsePreviewArgs } from "./preview.js";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { Boat, resolveCli, stoppedStates } from "./boat.js";
-import { configSchema, settingsDescriptors, providerId, resourceSchema } from "./config.js";
+import { configSchema, settingsDescriptors, developmentDefaults, providerId, resourceSchema } from "./config.js";
 import { lifecycle, idleKey, ownedClient, type BoatFactory } from "./lifecycle.js";
-import { shareContract } from "./share-contract.js";
-import { revealUrl } from "./browser.js";
 
 export function createPlugin(factory?: BoatFactory) {
   return async (bb: BbPluginApi) => {
@@ -15,7 +13,6 @@ export function createPlugin(factory?: BoatFactory) {
     const client: BoatFactory = factory ?? (async (scope) => new Boat(await resolveCli((await config()).cliPath), scope));
     const preview = previews(bb, client, lifetime.signal);
     const machines = lifecycle(bb, config, client, lifetime.signal);
-    const hostWorker = bb.hosts.experimental_client({ contract: shareContract });
     bb.experimental_machines.register(machines.definition);
     bb.experimental_environments.register({
       id: providerId, displayName: "Boat sandbox", icon: "Ship",
@@ -81,7 +78,7 @@ export function createPlugin(factory?: BoatFactory) {
       "bb boat dev [--thread <id>] [--port <port>] [--daemon <name>] [--command <command>] [--url] [--json]",
       "bb boat preview [--thread <id>] [--port <port>] [--daemon <name>] [--url] [--json]",
       "bb boat preview-stop [--thread <id>] [--json]",
-      "bb boat share [--thread <id>] [--port <port>] [--browser-host <id>] [--browser-instance <id>] [--url] [--json]",
+      "bb boat share [--thread <id>] [--port <port>] [--daemon <name>] [--command <command>] [--browser-host <id>] [--browser-instance <id>] [--url] [--json]",
       "bb boat doctor [--json]",
       "bb boat inspect <machine-id> [--json]",
       "bb boat allocations [--json]",
@@ -95,7 +92,7 @@ export function createPlugin(factory?: BoatFactory) {
         { name: "dev", summary: "Start development in a BB terminal, wait for the app and open its protected Boat preview", usage: "bb boat dev [--thread <id>] [--port <1-65535>] [--daemon <name>] [--command <shell-command>] [--browser-host <id>] [--browser-instance <id>] [--url] [--json]" },
         { name: "preview", summary: "Open a running app; --url explicitly returns its private sharing link", usage: "bb boat preview [--thread <id>] [--port <1-65535>] [--daemon <name>] [--browser-host <id>] [--browser-instance <id>] [--url] [--json]" },
         { name: "preview-stop", summary: "Hide this environment's plugin-created preview routes without stopping development", usage: "bb boat preview-stop [--thread <id>] [--json]" },
-        { name: "share", summary: "Privately share the supported Sofia development server and open it in this thread's browser panel", usage: "bb boat share [--thread <id>] [--port <1-65535>] [--browser-host <id>] [--browser-instance <id>] [--url] [--json]" },
+        { name: "share", summary: "Share a running app, or start one with --command, and open its private preview", usage: "bb boat share [--thread <id>] [--port <1-65535>] [--daemon <name>] [--command <command>] [--browser-host <id>] [--browser-instance <id>] [--url] [--json]" },
         { name: "doctor", summary: "Check CLI, login, start limits and snapshot retention", usage: "bb boat doctor [--json]" },
         { name: "inspect", summary: "Inspect the Boat resource belonging to a BB machine", usage: "bb boat inspect <machine-id> [--json]" },
         { name: "allocations", summary: "List tracked and uncertain Boat allocations", usage: "bb boat allocations [--json]" },
@@ -110,52 +107,26 @@ export function createPlugin(factory?: BoatFactory) {
         if (!command || ["help", "--help"].includes(command)) return { exitCode: 0, stdout: usage };
         try {
           switch (command) {
-            case "dev":
-            case "preview":
-              return reply(await preview.open(parsePreviewArgs(args, context.threadId, command === "dev"), signal));
             case "preview-stop": {
               if (args.length && (args.length !== 2 || args[0] !== "--thread")) break;
               const threadId = args[1] ?? context.threadId;
               if (!threadId) throw new Error("Run this in a BB thread, or pass --thread <id>.");
               return reply(await preview.stop(threadId, signal));
             }
+            case "dev":
+            case "preview":
             case "share": {
-              let threadId = context.threadId;
-              let port = 3000;
-              let browserHost: string | undefined;
-              let browserInstance: string | undefined;
-              let includeUrl = false;
-              for (let index = 0; index < args.length; index += 2) {
-                const option = args[index];
-                if (option === "--url") { includeUrl = true; index -= 1; continue; }
-                const value = args[index + 1];
-                if (!value || !["--thread", "--port", "--browser-host", "--browser-instance"].includes(option!)) {
-                  throw new Error("Usage: bb boat share [--thread <id>] [--port <1-65535>] [--browser-host <id>] [--browser-instance <id>] [--url] [--json].");
-                }
-                if (option === "--thread") threadId = value;
-                else if (option === "--browser-host") browserHost = value;
-                else if (option === "--browser-instance") browserInstance = value;
-                else port = Number(value);
-              }
-              if (!threadId) throw new Error("Run this in a BB thread, or pass --thread <id>.");
-              if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("--port must be an integer from 1 to 65535.");
-              const thread = await bb.sdk.threads.get({ threadId });
-              if (!thread.environmentId) throw new Error("This thread has no environment. Select a Boat sandbox first.");
-              const environment = await bb.sdk.environments.get({ environmentId: thread.environmentId });
-              if (!environment.path) throw new Error("This environment has no working directory yet.");
-              const host = await bb.sdk.hosts.get({ hostId: environment.hostId });
-              if (host.machineProviderId !== providerId) throw new Error("This thread is not on a Boat machine.");
-              if (host.status !== "connected" || host.lifecycle.phase !== "active") throw new Error("Resume the thread's Boat machine before sharing its development server.");
-              const result = await hostWorker.call("share", { workspacePath: environment.path, port }, { hostId: environment.hostId, signal, timeoutMs: 120_000 });
-              const { browser, matched, browserTarget } = await revealUrl(bb, result.url, { threadId, browserHost, browserInstance });
-              const message = browser !== "unavailable"
-                ? `Sofia is shared; browser tab ${browser} on host ${browserTarget!.hostId}, instance ${browserTarget!.instanceId}. Select the thread in that desktop window to see it. Inspect with bb browser instances --host ${browserTarget!.hostId}.`
-                : matched === null
-                  ? "Sofia is shared, but BB could not open its browser. Use --url to retrieve the private link."
-                  : `Sofia is shared; ${matched} desktop windows matched across the selected connected hosts. Select a desktop with --browser-host/--browser-instance, or retrieve the private link with --url.`;
-              if (json) return reply({ ...result, browser, browserTarget, message });
-              if (includeUrl) return { exitCode: 0, stdout: result.url };
-              return { exitCode: 0, stdout: `${new URL(result.url).origin}/\n${message}\nAccess token withheld; use --url or --json to retrieve the private link.` };
+              const explicitStart = command === "dev" || (command === "share" && args.includes("--command"));
+              const explicit = parsePreviewArgs(args, context.threadId, explicitStart);
+              const thread = await bb.sdk.threads.get({ threadId: explicit.threadId });
+              const defaults = developmentDefaults(await config(), thread.projectId);
+              const start = explicitStart || (command === "share" && Boolean(defaults.command));
+              const options = parsePreviewArgs(args, context.threadId, start, defaults);
+              if (command !== "share") return reply(await preview.open(options, signal));
+              const result = await preview.open({ ...options, includeUrl: json || options.includeUrl }, signal);
+              if (json) return reply(result);
+              if (options.includeUrl) return { exitCode: 0, stdout: result.url! };
+              return { exitCode: 0, stdout: `${result.origin}/\n${result.message}\nAccess token withheld; use --url or --json to retrieve the private link.` };
             }
             case "doctor": {
               if (args.length) break;

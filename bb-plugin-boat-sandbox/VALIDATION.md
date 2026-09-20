@@ -163,10 +163,10 @@ exercised by core on the first thread start and was not part of this run.
 
 ## Share test-drive fixes (2026-09-20)
 
-- Plain `bb boat share` on the existing Sofia Boat thread returned only the
+- Plain `bb boat share` on the existing application Boat thread returned only the
   origin, token-withheld guidance, and the actual desktop host/instance.
 - Explicit JSON retained the private URL. An in-memory cookie-jar request
-  followed its authorization redirect and received HTTP 200 with the Sofia
+  followed its authorization redirect and received HTTP 200 with the application
   login title and CSRF metadata. No token was printed or saved in this report.
 - The browser operation reported `reused` on the Mac desktop. That host's
   `bb browser instances` listed the same instance; the Boat machine listed none.
@@ -177,6 +177,18 @@ exercised by core on the first thread start and was not part of this run.
 - The repair writes `/etc/sysctl.d/99-bb-boat-userns.conf` inside Boat. The plugin
   also runs it before the template hook on every create/resume, so old named
   templates benefit without being rebuilt from an enrolled machine.
-- The existing Sofia preview remains available. No stop, suspend, or template
+- The existing application preview remains available. No stop, suspend, or template
   replacement was performed. A full sleep/wake was not exercised in this run.
 - All 44 tests, TypeScript checking, and the plugin build passed.
+
+## General development configuration
+
+- Removed the project-specific host worker, layout checks, environment-file
+  edits, and repository-script startup. Share now uses the generic preview path.
+- Global command, port, and daemon defaults are plugin settings. Project-ID
+  overrides live in the same settings; CLI flags take precedence.
+- 43 tests, typecheck, and build pass, covering arbitrary ports, explicit and
+  configured startup commands, inheritance, invalid settings, and token output.
+- Reloaded the plugin and shared an existing application on port 3000 without
+  restarting it. The generic Boat route opened successfully and repeat sharing
+  reused its tab.

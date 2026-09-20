@@ -266,10 +266,19 @@ preview tabs in the same thread are reused. The thread must be focused for BB to
 reveal its tab. Regular command output omits the token; only `--url` returns it.
 Treat that URL as a private invitation, not a public link to publish.
 
-For Sofia's supported layout, `bb boat share` repairs the sandbox-local bind
-address, starts the app, and opens its private preview. Plain output withholds
-the token; `bb boat share --url` returns only the private URL, and `--json`
-returns the full result including the tokenized URL and browser target.
+`bb boat share --port 5173` shares any running development server. Omit the port
+for Pitchfork discovery, or choose a daemon with `--daemon web`. Pass an explicit
+startup command to start an app when needed:
+
+```sh
+bb boat share --command 'npm run dev -- --host 0.0.0.0' --port 5173
+```
+
+The command runs in a BB thread terminal with inspectable logs. Sharing never
+rewrites project configuration or stops its daemons. The app must bind
+`0.0.0.0` and allow its Boat hostname. Plain output withholds the token;
+`bb boat share --url` returns only the private URL, and `--json` returns the
+full result including the tokenized URL and browser target.
 
 On create and resume, Boat preparation sets Ubuntu's
 `kernel.apparmor_restrict_unprivileged_userns=0` before the template hook, so
@@ -285,3 +294,22 @@ routes are preserved, including on `preview-stop`. Unreachable machines are retr
 when they reconnect. Disabling the plugin stops automatic cleanup; remove an
 orphaned route with `boat exec <sandbox> 'host hide <port>'`. A preview belongs to a
 machine and port: threads on the same machine and port share the same application.
+
+### Development settings per project
+
+Set global defaults in Settings → Plugins → Boat Sandboxes:
+`developmentCommand`, `developmentPort`, and `developmentDaemon`.
+`projectDevelopment` stores overrides keyed by BB project ID in the same plugin
+settings; no repository configuration file is required. For example:
+
+```sh
+bb plugin config boat-sandbox set projectDevelopment '{"proj_example":{"command":"npm run dev -- --host 0.0.0.0","port":5173}}'
+```
+
+This replaces the overrides object; preserve other project entries when editing.
+CLI flags override project settings, which override global defaults. Omitted
+project fields inherit; command `""` disables automatic startup by `share`, and
+port `0` selects Pitchfork discovery. `share` starts a missing app only when a
+command is configured or passed explicitly. `preview` never starts an app;
+`dev` uses the configured command, falling back to `mise run dev`.
+Settings are local to this BB installation and are not shared through Git.
