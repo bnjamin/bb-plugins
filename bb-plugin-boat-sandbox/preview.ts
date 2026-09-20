@@ -4,6 +4,7 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { providerId, resourceSchema } from "./config.js";
 import { idleKey, ownedClient, type BoatFactory } from "./lifecycle.js";
+import { revealUrl } from "./browser.js";
 
 export const previewOptions = z.object({
   threadId: z.string().min(1),
@@ -97,24 +98,12 @@ export function previews(bb: BbPluginApi, client: BoatFactory, lifetime: AbortSi
       await bb.storage.kv.set(key, record);
       const url = await boat.hostPreview(resource.sandboxId, port, signal);
       await bb.storage.kv.set(idleKey(host.id), Date.now());
-      let browser = "unavailable";
-      let message = "Preview ready. Use --url to retrieve its private sharing link.";
-      try {
-        const hosts = await bb.sdk.hosts.list();
-        const instances = (await Promise.all(hosts.filter(h => h.status === "connected" && (!options.browserHost || h.id === options.browserHost)).map(async h =>
-          (await bb.sdk.experimental_desktopBrowsers.listInstances({ hostId: h.id })).instances))).flat()
-          .filter(i => !options.browserInstance || i.instanceId === options.browserInstance);
-        if (instances.length === 1) {
-          const instance = instances[0]!;
-          const scope = { hostId: instance.hostId, instanceId: instance.instanceId, generation: instance.generation, threadId: options.threadId };
-          const tabs = await bb.sdk.experimental_desktopBrowsers.listTabs(scope);
-          const tab = tabs.tabs.find(t => { try { return new URL(t.url).origin === new URL(url).origin; } catch { return false; } });
-          if (tab) await bb.sdk.experimental_desktopBrowsers.revealTab({ ...scope, tabId: tab.tabId });
-          else await bb.sdk.experimental_desktopBrowsers.createTab({ ...scope, url, presentation: "reveal" });
-          browser = tab ? "reused" : "opened";
-          message = "Preview ready in this thread's browser panel. Select the thread to see it.";
-        } else message = `Preview ready; ${instances.length} desktop windows matched. Select one with --browser-host/--browser-instance or retrieve the private link with --url.`;
-      } catch { message = "Preview ready, but BB could not open its browser. Use --url to retrieve the private link."; }
+      const { browser, matched } = await revealUrl(bb, url, options);
+      const message = browser !== "unavailable"
+        ? "Preview ready in this thread's browser panel. Select the thread to see it."
+        : matched === null
+          ? "Preview ready, but BB could not open its browser. Use --url to retrieve the private link."
+          : `Preview ready; ${matched} desktop windows matched. Select one with --browser-host/--browser-instance or retrieve the private link with --url.`;
       return { hostId: host.id, port, origin: new URL(url).origin, browser, terminalId: record.terminalId, message, ...(options.includeUrl ? { url } : {}) };
     } finally { busy.delete(environment.id); }
   }

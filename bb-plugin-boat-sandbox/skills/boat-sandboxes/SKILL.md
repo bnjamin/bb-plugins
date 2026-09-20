@@ -119,6 +119,25 @@ original login before lifecycle operations.
 
 ## App previews
 
+For the supported Sofia Rails layout, use `bb boat share` to repair its
+sandbox-local `HOST=0.0.0.0` setting, start its daemons, and return a private
+HTTPS Boat URL for port 3000. It runs only for a Boat-backed thread whose
+workspace has `mise.toml` daemons for `rails`, `js`, and `css`, plus
+`script/dev-start.rb`; other projects fail clearly rather than receiving
+Sofia-specific changes. `--port` overrides 3000. The returned URL contains a
+private access token: do not paste it into shared logs or messages.
+
+Like `bb boat preview`, it opens the app in this thread's browser panel when
+exactly one connected desktop window matches, reusing a tab already on that
+origin instead of adding a duplicate. When zero or several windows match it
+still returns the link and names `--browser-host`/`--browser-instance` for
+choosing one.
+
+Sofia itself must allow Boat's public hostname in development, for example
+`config.hosts << /.*\.on\.ascii\.dev/`; without that repository change Rails
+returns 403 before the application sees the request. The plugin deliberately
+does not edit application host authorization.
+
 Use `bb boat dev` in a Boat thread to run `mise run dev` in a BB terminal, discover
 Rails' assigned Pitchfork port, privately host it through Boat, and open it in the
 thread's normal sidebar browser. No repo-specific preview script or BB Connect
