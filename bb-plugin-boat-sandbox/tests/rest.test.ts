@@ -41,7 +41,8 @@ test("requests authenticate, bill to the scope and never leak error bodies", asy
   const limits = calls.find((call) => call.path === "/limits")!;
   assert.equal(limits.headers.authorization, "Bearer boat_secret_key");
   assert.equal(limits.headers["x-boat-org"], "personal");
-  assert.equal(calls.find((call) => call.path === "/account/data-retention")!.headers["x-boat-org"], undefined);
+  // Retention is read for the configured scope, as the CLI's --org did.
+  assert.equal(calls.find((call) => call.path === "/account/data-retention")!.headers["x-boat-org"], "personal");
 });
 
 test("the API identity hashes the account email like the CLI login", async () => {
@@ -53,9 +54,9 @@ test("the API identity hashes the account email like the CLI login", async () =>
   };
   const boat = new Boat("boat", "personal", cli, rest);
   assert.equal(await boat.accountIdentity(signal()), createHash("sha256").update(email).digest("hex"));
-  await boat.checkTransportsMatch(signal());
+  assert.equal(await boat.verifiedAccountIdentity(signal()), createHash("sha256").update(email).digest("hex"));
   const other = new Boat("boat", "personal", async () => ({ exitCode: 0, stdout: JSON.stringify({ account: { identifier: "someone@else.test", loginState: "active" } }), stderr: "" }), rest);
-  await assert.rejects(other.checkTransportsMatch(signal()), /different accounts/);
+  await assert.rejects(other.verifiedAccountIdentity(signal()), /different accounts/);
 });
 
 test("creation sends the allocation key as the idempotency key and retries until Boat returns the sandbox", async () => {
@@ -167,4 +168,44 @@ test("doctor reads whether the environment hands sandboxes a Boat API key", asyn
   // Environments select the organization by query parameter, not the header.
   assert.equal(calls[0]!.path, "/environments?org=team_1");
   assert.equal(await new Boat("boat", "personal", noCli).passesBoatCredentials("base", signal()), null);
+});
+
+test("an error while waiting for a stop is reported, not power-cycled back to running", async () => {
+  const { calls, rest } = api(() => ok({ sandbox: { id: "bx_test", state: "error" } }));
+  const boat = new Boat("boat", "personal", noCli, rest);
+  await assert.rejects(boat.waitFor("bx_test", new Set(["archived", "stopped"]), signal()), /in error/);
+  assert.ok(!calls.some((call) => call.path.endsWith("/recover")));
+});
+
+test("a resume whose response is lost waits for the resume Boat accepted", async () => {
+  let state = "archived";
+  const { rest } = api((call) => {
+    if (call.path.endsWith("/resume")) { state = "ready"; return new TypeError("socket hang up"); }
+    if (call.method === "PATCH") return ok({});
+    return ok({ sandbox: { id: "bx_test", state, snapshotAvailable: true }, enabled: false, canStart: true });
+  });
+  await new Boat("boat", "personal", noCli, rest).resume("bx_test", 3600, signal());
+  const never = api((call) => call.path.endsWith("/resume") ? new TypeError("socket hang up") : ok({ sandbox: { id: "bx_test", state: "archived", snapshotAvailable: true }, enabled: false, canStart: true }));
+  await assert.rejects(new Boat("boat", "personal", noCli, never.rest).resume("bx_test", 3600, signal()), (error: BoatCommandError) => error.code === "network_error");
+});
+
+test("hosting failures through the API say what failed, and cancellation stays a cancellation", async () => {
+  const boat = new Boat("boat", "personal", noCli, api(() => failure(400, "machine_not_running")).rest);
+  await assert.rejects(boat.hostPreview("bx_test", 3000, signal()), /could not host port 3000 \(machine_not_running\)/);
+  const controller = new AbortController();
+  const slow = new Boat("boat", "personal", noCli, api(() => { controller.abort(new Error("share cancelled")); return new TypeError("aborted"); }).rest);
+  await assert.rejects(slow.hostPreview("bx_test", 3000, controller.signal), /share cancelled/);
+});
+
+test("a stop that is not sent clears the hook marker so Boat's auto-stop runs the hook", async () => {
+  const commands: string[] = [];
+  const { rest } = api((call) => {
+    if (call.path === "/account/data-retention") return ok({ enabled: false });
+    if (call.path.endsWith("/commands")) { commands.push((call.body as { command: string }).command); return ok({ exitCode: 0, stdout: "" }); }
+    if (call.path.endsWith("/stop")) return failure(402, "billing_required");
+    return ok({ sandbox: { id: "bx_test", state: "ready" } });
+  });
+  const boat = new Boat("boat", "personal", async () => ({ exitCode: 0, stdout: "", stderr: "" }), rest);
+  await assert.rejects(boat.stop("bx_test", signal()), (error: BoatCommandError) => error.code === "billing_required");
+  assert.deepEqual(commands, ["rm -f $HOME/.cache/bb-boat/before-suspend.ran"]);
 });

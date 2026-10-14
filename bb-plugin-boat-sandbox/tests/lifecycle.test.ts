@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { createFakePluginHost, experimental_scanPublicSdkOnly, makeHostResponse, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import { Boat, type Sandbox } from "../boat.js";
 import { createPlugin } from "../server.js";
-import { lifecycle, allocationStorageKey, idleKey, expiryWakeKey, expiryWarningKey } from "../lifecycle.js";
+import { lifecycle, allocationStorageKey, idleKey, expiryWakeKey, expiryWarningKey, ownedClient } from "../lifecycle.js";
 import { configSchema, type Config, type Resource } from "../config.js";
 import { BoatRest } from "../rest.js";
 
@@ -20,7 +20,7 @@ class FakeBoat extends Boat {
   override async preflight() { this.calls.push("preflight"); }
   override async accountIdentity() { return this.account; }
   override async cliAccountIdentity() { return this.account; }
-  override async checkTransportsMatch() { this.calls.push("transports"); }
+  override async verifiedAccountIdentity() { this.calls.push("transports"); return this.account; }
   override async create(_: Config, __: string, ___: AbortSignal, allocated: (id: string) => Promise<void>) {
     this.calls.push("new");
     if (this.createFailure === "before") throw new Error("response lost");
@@ -168,13 +168,15 @@ test("account changes cannot turn inaccessible sandboxes into successful cleanup
   assert.ok(await f.bb.storage.kv.get(allocationStorageKey("launch1")));
 });
 
-async function sleepingFixture(t: { after(fn: () => unknown): void }, options: { state: Sandbox; suspendedAt?: number; settings?: Record<string, number> }) {
+async function sleepingFixture(t: { after(fn: () => unknown): void }, options: { state: Sandbox; suspendedAt?: number; settings?: Record<string, number>; currentPhase?: "suspended" | "resuming" }) {
   const boat = new FakeBoat(); boat.state = options.state;
   const host = makeHostResponse({ id: "host1", machineProviderId: "boat-sandbox", lifecycle: { phase: "suspended", message: null, pendingLog: "", suspendedAt: options.suspendedAt ?? Date.now(), teardown: null } });
+  const current = { ...host, lifecycle: { ...host.lifecycle, phase: options.currentPhase ?? "suspended" } };
   const { bb, harness } = createFakePluginHost({
     pluginId: "boat-sandbox", machineResource: async () => resource, settings: options.settings,
     sdk: { hosts: {
       list: async () => [host],
+      get: async () => current,
       experimental_reconcile: async () => { boat.calls.push("reconcile-core"); return host; },
       experimental_resume: async () => { boat.calls.push("resume-core"); return host; },
       experimental_suspend: async () => { boat.calls.push("suspend-core"); return host; },
@@ -191,6 +193,16 @@ test("running compute behind a sleeping machine is reconciled through core", asy
   await harness.behavior.runSchedule("maintain-boat-machines");
   assert.deepEqual(boat.calls, ["info", "reconcile-core"]);
   assert.ok(harness.inspection.logEntries.some((entry) => entry.level === "warn" && /running while BB has host1 asleep/.test(entry.message)));
+});
+
+test("compute that is running because a wake is in progress is not reconciled", async (t) => {
+  const resuming = await sleepingFixture(t, { state: { id: "bx_test", state: "ready" }, currentPhase: "resuming" });
+  await resuming.harness.behavior.runSchedule("maintain-boat-machines");
+  assert.deepEqual(resuming.boat.calls, ["info"]);
+  const waking = await sleepingFixture(t, { state: { id: "bx_test", state: "ready" } });
+  await waking.bb.storage.kv.set(expiryWakeKey("host1"), Date.now());
+  await waking.harness.behavior.runSchedule("maintain-boat-machines");
+  assert.deepEqual(waking.boat.calls, ["info"]);
 });
 
 test("a stopped machine asleep for less than the wake threshold is left alone", async (t) => {
@@ -264,4 +276,21 @@ test("a request first sent through the CLI is never retried with an idempotency 
   const manager = lifecycle(f.bb, async () => configSchema.parse({}), async () => api, new AbortController().signal);
   await assert.rejects(manager.definition.create({ ...f.context, attempt: 2 }), /Uncertain Boat allocation/);
   assert.ok(!api.calls.includes("new"));
+});
+
+test("a machine pinned through the CLI stays manageable when the API identity differs", async () => {
+  const boat = new FakeBoat(new BoatRest("boat_test", "personal", (async () => { throw new Error("unused"); }) as typeof fetch));
+  boat.accountIdentity = async () => "hash-of-differently-cased-email";
+  const managed = await ownedClient(async () => boat, resource, new AbortController().signal);
+  assert.equal(managed.transport, "cli");
+  boat.cliAccountIdentity = async () => "someone-else";
+  await assert.rejects(ownedClient(async () => boat, resource, new AbortController().signal), /Boat login changed/);
+});
+
+test("a retried create never enrolls a sandbox that has snapshots off", async (t) => {
+  const f = await fixture(); t.after(() => f.harness.lifecycle.dispose());
+  await f.bb.storage.kv.set(allocationStorageKey("launch1"), { key: "launch1", scope: "personal", accountIdentity: "account1", sandboxId: "bx_test", ttlSeconds: 3600 });
+  f.boat.state = { id: "bx_test", state: "ready", snapshots: false };
+  await assert.rejects(f.manager.definition.create(f.context), /snapshots off/);
+  assert.ok(!f.boat.calls.includes("bootstrap"));
 });

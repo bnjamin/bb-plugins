@@ -216,7 +216,9 @@ instead of starting a CLI process for each. SSH (daemon installation, hooks) and
 must belong to the same account; `bb boat doctor` and every new allocation check
 this. Use a key with the `ci` preset (`boat api-key create --preset ci`), entered
 as a secret setting. Without a key, everything uses the CLI as before. Machines
-created either way stay manageable by both: the account fingerprint is the same.
+created either way stay manageable by both: the account fingerprint is the same,
+and a machine whose fingerprint the API cannot reproduce is managed through the
+CLI login instead.
 
 Through the API, creation is idempotent: the BB allocation key is sent as Boat's
 `Idempotency-Key`, and the exact request is stored with the allocation. A retry

@@ -63,6 +63,11 @@ export function createPlugin(factory?: BoatFactory) {
         const resource = resourceSchema.parse(await bb.experimental_machines.getResource(host.id));
         const state = await (await ownedClient(client, resource, signal)).info(resource.sandboxId, signal);
         if (runningStates.has(state.state)) {
+          // A wake (ours or the user's) runs compute before BB marks the host
+          // active; reconciling then would stop the machine mid-wake.
+          const wakeStartedAt = await bb.storage.kv.get<number>(expiryWakeKey(host.id));
+          if (wakeStartedAt !== undefined && Date.now() < wakeStartedAt + 30 * 60_000) return;
+          if ((await bb.sdk.hosts.get({ hostId: host.id })).lifecycle.phase !== "suspended") return;
           bb.log.warn(`Boat ${resource.sandboxId} is running while BB has ${host.id} asleep; asking BB to save and stop it.`);
           await bb.sdk.hosts.experimental_reconcile({ hostId: host.id });
           return;
@@ -195,7 +200,7 @@ export function createPlugin(factory?: BoatFactory) {
               if (args.length) break;
               const current = await config();
               const boat = await client(current.scope);
-              const [, , boatCredentials] = await Promise.all([boat.preflight(signal), boat.checkTransportsMatch(signal), boat.passesBoatCredentials(current.environment, signal)]);
+              const [, , boatCredentials] = await Promise.all([boat.preflight(signal), boat.verifiedAccountIdentity(signal), boat.passesBoatCredentials(current.environment, signal)]);
               const warnings = boatCredentials ? [`Boat environment ${current.environment} gives sandboxes a Boat API key, so agents on BB machines can stop, snapshot or resume them. Turn it off with boat env set ${current.environment} --boat-credentials false.`] : [];
               return reply({ ok: true, cli: boat.cli, transport: boat.transport, boatCredentials, warnings, scope: current.scope, environment: current.environment, snapshot: current.snapshot || null, machineType: current.machineType, ttlSeconds: current.ttlSeconds, idleMinutes: current.idleMinutes });
             }

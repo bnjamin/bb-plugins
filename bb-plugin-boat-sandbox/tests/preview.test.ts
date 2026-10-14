@@ -18,7 +18,6 @@ class FakeBoat extends Boat {
   override async accountIdentity() { return this.account; }
   override async previewPort(_: string, cwd: string) { assert.equal(cwd, "/remote/project"); return this.port; }
   override async portReady() { return this.ready; }
-  override async hostedPort() { return this.existing; }
   relayed = false;
   binding: "address" | "loopback" | "none" = "address";
   override async route() { return { hosted: this.existing, localhost: this.relayed }; }
@@ -187,7 +186,7 @@ test("Boat status discovery parses assigned ports and treats down routes as unow
   });
   const signal = new AbortController().signal;
   assert.equal(await boat.previewPort("bx_test", "/project with spaces", "rails", signal), 3017);
-  assert.equal(await boat.hostedPort("bx_test", 3017, signal), false);
+  assert.deepEqual(await boat.route("bx_test", 3017, signal), { hosted: false, localhost: false });
   assert.match(requests[0]!, /cd '\/project with spaces'/);
 });
 

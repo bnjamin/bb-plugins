@@ -13,6 +13,8 @@ export interface RestRequest {
   scoped?: boolean;
   // Safe to repeat after a lost response or a transient failure.
   idempotent?: boolean;
+  // Defaults to 30 seconds; slow lifecycle calls pass more.
+  timeoutMs?: number;
 }
 
 // The Boat REST API. Responses have the same shapes as the CLI's --json
@@ -35,7 +37,7 @@ export class BoatRest {
             ...options.headers,
           },
           body: options.body === undefined ? undefined : JSON.stringify(options.body),
-          signal: AbortSignal.any([options.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
+          signal: AbortSignal.any([options.signal, AbortSignal.timeout(options.timeoutMs ?? REQUEST_TIMEOUT_MS)]),
         });
       } catch (error) {
         options.signal.throwIfAborted();

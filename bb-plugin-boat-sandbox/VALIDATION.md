@@ -215,7 +215,7 @@ exercised by core on the first thread start and was not part of this run.
 ## REST transport and Boat platform features — 2026-10-14
 
 Boat CLI 1.0.9 on the BB server, with a `ci`-preset API key for the same Personal
-account. Typecheck, 74 automated tests and `bb plugin build` passed. A live script
+account. Typecheck, 81 automated tests and `bb plugin build` passed. A live script
 drove the plugin's `Boat` class against disposable `small` sandboxes, deleting
 each in `finally`; all four test sandboxes were confirmed gone (`404`) afterwards.
 

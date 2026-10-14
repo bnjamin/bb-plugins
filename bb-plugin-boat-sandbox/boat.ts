@@ -24,6 +24,8 @@ export const sandboxSchema = z.object({
 });
 export type Sandbox = z.infer<typeof sandboxSchema>;
 const retentionSchema = z.object({ enabled: z.boolean(), snapshotsOff: z.boolean().optional() });
+// Lifecycle calls that can take a while to be accepted.
+const SLOW_REQUEST_MS = 300_000;
 const sandboxIdSchema = z.string().regex(/^bx_[A-Za-z0-9]+$/);
 const sandboxPath = (id: string) => encodeURIComponent(sandboxIdSchema.parse(id));
 // Deterministic: an idempotent retry must send exactly the same body.
@@ -93,9 +95,10 @@ export function snapshotsOffMessage(scope: string) {
 // Boat runs ~/.boat/pre-stop before the final snapshot of every stop,
 // including its own auto-stop when BB is offline and the lease runs out.
 // BB-initiated suspends already ran the hook, and leave a fresh marker.
+const SUSPEND_MARKER = "$HOME/.cache/bb-boat/before-suspend.ran";
 export const PRE_STOP_SCRIPT = `#!/bin/bash
 # bb-boat-managed: installed by BB's Boat Sandboxes plugin and refreshed on every wake.
-marker="$HOME/.cache/bb-boat/before-suspend.ran"
+marker="${SUSPEND_MARKER}"
 if [ -n "$(find "$marker" -mmin -20 2>/dev/null)" ]; then rm -f "$marker"; exit 0; fi
 rm -f "$marker"
 hook="$HOME/.config/bb-boat/before-suspend"
@@ -168,9 +171,6 @@ export class Boat {
     const probe = `const net=require('node:net');const s=net.connect({host:'127.0.0.1',port:${port}},()=>{s.destroy();process.exit(0)});s.setTimeout(2000,()=>process.exit(1));s.on('error',()=>process.exit(1));`;
     return (await this.previewExec(id, `node -e ${shellQuote(probe)}`, signal)).exitCode === 0;
   }
-  async hostedPort(id: string, port: number, signal: AbortSignal): Promise<boolean> {
-    return (await this.route(id, port, signal)).hosted;
-  }
   // `(localhost)` marks a port Boat relays to 127.0.0.1 or ::1.
   async route(id: string, port: number, signal: AbortSignal): Promise<{ hosted: boolean; localhost: boolean }> {
     const result = await this.previewExec(id, "host list", signal);
@@ -189,8 +189,14 @@ export class Boat {
   }
   async hostPreview(id: string, port: number, signal: AbortSignal, localhost = false): Promise<string> {
     let raw: string;
-    if (this.rest) raw = JSON.stringify(await this.rest.request("host", "POST", `/sandboxes/${sandboxPath(id)}/host`, { signal, body: { port, title: "BB app preview", public: false, localhost } }).catch(() => null));
-    else {
+    if (this.rest) {
+      try { raw = JSON.stringify(await this.rest.request("host", "POST", `/sandboxes/${sandboxPath(id)}/host`, { signal, body: { port, title: "BB app preview", public: false, localhost } })); }
+      catch (error) {
+        signal.throwIfAborted();
+        const code = error instanceof BoatCommandError ? ` (${error.code})` : "";
+        throw new Error(`Boat could not host port ${port}${code}. Check that the sandbox is running and the API key may host ports.`, { cause: error });
+      }
+    } else {
       try { raw = await this.checked(["host", id, String(port), "--private", "--title", "BB app preview", ...(localhost ? ["--localhost"] : [])], { signal }); }
       catch (error) {
         if (localhost) throw new Error("This app listens only on localhost. Hosting it needs a Boat CLI with --localhost (run boat self-update on the BB server) or a Boat API key in settings; or start the app on 0.0.0.0.", { cause: error });
@@ -223,11 +229,16 @@ export class Boat {
   }
   // SSH uses the CLI login while the API key manages lifecycle; both must be
   // the same account, or machines would be created that BB cannot reach.
-  async checkTransportsMatch(signal: AbortSignal): Promise<void> {
-    if (!this.rest) return;
+  // Returns the account identity to pin on a new machine.
+  async verifiedAccountIdentity(signal: AbortSignal): Promise<string> {
+    if (!this.rest) return this.cliAccountIdentity(signal);
     const [api, cli] = await Promise.all([this.accountIdentity(signal), this.cliAccountIdentity(signal)]);
     if (api !== cli) throw new Error("The Boat API key and the Boat CLI login on the BB server belong to different accounts. Use a key for the signed-in account.");
+    return api;
   }
+  // The same account through the CLI only, for machines whose pinned identity
+  // the API cannot reproduce.
+  withoutApi(): Boat { return new Boat(this.cli, this.scope, this.runner); }
   // Whether the environment gives sandboxes a Boat API key, which lets agents
   // in them stop, snapshot or resume their own machine. Needs the API.
   async passesBoatCredentials(environment: string, signal: AbortSignal): Promise<boolean | null> {
@@ -237,7 +248,7 @@ export class Boat {
     return environments.find((candidate) => candidate.name === environment)?.passSandboxCredentials ?? null;
   }
   private async retention(signal: AbortSignal) {
-    return retentionSchema.parse(this.rest ? await this.rest.get("data-retention", "/account/data-retention", signal) : await this.json(["data-retention", "status"], signal));
+    return retentionSchema.parse(this.rest ? await this.rest.get("data-retention", "/account/data-retention", signal, true) : await this.json(["data-retention", "status"], signal));
   }
   async preflight(signal: AbortSignal): Promise<void> {
     // Both checks are independent read-only API calls; each costs a CLI start
@@ -267,7 +278,7 @@ export class Boat {
     const deadline = Date.now() + 180_000;
     for (;;) {
       try {
-        const raw = await this.rest!.request("new", "POST", "/sandboxes", { signal, body, scoped: true, idempotent: true, headers: { "idempotency-key": key } });
+        const raw = await this.rest!.request("new", "POST", "/sandboxes", { signal, body, scoped: true, idempotent: true, timeoutMs: SLOW_REQUEST_MS, headers: { "idempotency-key": key } });
         const { sandbox } = z.object({ sandbox: z.object({ id: sandboxIdSchema }) }).parse(raw);
         await onAllocated(sandbox.id);
         return sandbox.id;
@@ -316,7 +327,7 @@ export class Boat {
     while (Date.now() < deadline) {
       let candidates: { id: string; state: string }[] = [];
       try {
-        candidates = listSchema.parse(this.rest ? await this.rest.get("list", "/sandboxes?limit=200", signal, true) : await this.json(["list", "--all"], signal)).sandboxes
+        candidates = listSchema.parse(await this.json(["list", "--all"], signal)).sandboxes
           .filter((sandbox) => (sandbox.createdAt ?? "") >= since && !stoppedStates.has(sandbox.state) && !["error", "deleted"].includes(sandbox.state));
       } catch { /* Transient listing failure; retry below. */ }
       if (candidates.length === 0) return undefined;
@@ -332,6 +343,9 @@ export class Boat {
   async waitFor(id: string, states: Set<string>, signal: AbortSignal, check?: (sandbox: Sandbox) => void): Promise<Sandbox> {
     const deadline = Date.now() + 900_000;
     let recoveredAt: number | undefined;
+    // Power-cycling brings a sandbox back running, which only helps a caller
+    // waiting for it to run; a stop would otherwise never be sent again.
+    const recoverable = [...states].some((state) => runningStates.has(state));
     while (Date.now() < deadline) {
       const sandbox = await this.info(id, signal);
       if (states.has(sandbox.state)) return sandbox;
@@ -341,7 +355,7 @@ export class Boat {
         // Boat lost the machine or a start failed. A recover power-cycles it
         // without touching the disk; a resume would lose unsnapshotted work,
         // so it is never done automatically.
-        if (recoveredAt === undefined && await this.recover(id, signal)) recoveredAt = Date.now();
+        if (recoverable && recoveredAt === undefined && await this.recover(id, signal)) recoveredAt = Date.now();
         else if (recoveredAt === undefined || Date.now() > recoveredAt + 180_000) throw new Error(errorStateMessage(id, this.rest !== undefined));
       }
       await delay(3000, undefined, { signal });
@@ -371,14 +385,16 @@ export class Boat {
       if (!current.snapshotAvailable) throw new Error(`Boat ${id} has no recoverable snapshot. Refusing to replace its data with a fresh machine.`);
       await this.preflight(signal);
       try {
-        if (this.rest) await this.rest.request("resume", "POST", `/sandboxes/${sandboxPath(id)}/resume`, { signal, body: { ttlSeconds: ttl } });
+        if (this.rest) await this.rest.request("resume", "POST", `/sandboxes/${sandboxPath(id)}/resume`, { signal, body: { ttlSeconds: ttl }, timeoutMs: SLOW_REQUEST_MS });
         else await this.checked(["resume", id, "--ttl", String(ttl)], { signal, timeoutMs: 900_000 });
       } catch (error) {
         if (error instanceof BoatCommandError && error.code === "snapshot_data_expired") {
           throw new Error(`Boat deleted the saved disk of ${id} because it stayed asleep for more than 14 days. This machine cannot be woken; remove it with bb machine remove.`);
         }
-        // A concurrent resume already started it; wait for that one.
-        if (!(error instanceof BoatCommandError && (error.readinessFailed || error.code === "sandbox_resuming"))) throw error;
+        // A concurrent resume already started it; wait for that one. A lost
+        // response may also hide a resume Boat accepted: wait if it left `stopped`.
+        const lost = error instanceof BoatCommandError && error.code === "network_error" && !stoppedStates.has((await this.info(id, signal)).state);
+        if (!lost && !(error instanceof BoatCommandError && (error.readinessFailed || error.code === "sandbox_resuming"))) throw error;
       }
       await this.waitFor(id, runningStates, signal);
     }
@@ -394,12 +410,17 @@ export class Boat {
     let sandbox = await this.info(id, signal);
     if (!stoppedStates.has(sandbox.state)) {
       if (sandbox.snapshots === false) throw new Error(`Boat ${id} was created with snapshots off; stopping it would erase its data. It is left running. Remove the machine when it is no longer needed.`);
-      if (runningStates.has(sandbox.state)) await this.hook(id, "before-suspend", signal);
+      const hooked = runningStates.has(sandbox.state);
+      if (hooked) await this.hook(id, "before-suspend", signal);
       try {
-        if (this.rest) await this.rest.request("stop", "POST", `/sandboxes/${sandboxPath(id)}/stop`, { signal, body: {}, idempotent: true });
+        if (this.rest) await this.rest.request("stop", "POST", `/sandboxes/${sandboxPath(id)}/stop`, { signal, body: {}, idempotent: true, timeoutMs: SLOW_REQUEST_MS });
         else await this.checked(["stop", id], { signal, timeoutMs: 900_000 });
       } catch (error) {
-        if (!(error instanceof BoatCommandError && error.code === "sandbox_stopping")) throw error;
+        if (!(error instanceof BoatCommandError && error.code === "sandbox_stopping")) {
+          // The machine keeps running; a later auto-stop must run the hook again.
+          if (hooked) await this.previewExec(id, `rm -f ${SUSPEND_MARKER}`, AbortSignal.timeout(30_000)).catch(() => {});
+          throw error;
+        }
       }
       sandbox = await this.waitFor(id, stoppedStates, signal, refusedStop);
     }

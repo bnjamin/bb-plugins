@@ -17,8 +17,11 @@ export function expiryStart(snapshotCompletedAt: string | null | undefined, susp
 }
 export async function ownedClient(client: BoatFactory, resource: Pick<Resource, "scope" | "accountIdentity">, signal: AbortSignal): Promise<Boat> {
   const boat = await client(resource.scope);
-  if (await boat.accountIdentity(signal) !== resource.accountIdentity) throw new Error("Boat login changed. Restore the account that created this machine before managing it.");
-  return boat;
+  if (await boat.accountIdentity(signal) === resource.accountIdentity) return boat;
+  // A machine pinned through the CLI keeps working if the API cannot
+  // reproduce its identity exactly; it is then managed through the CLI.
+  if (boat.rest && await boat.cliAccountIdentity(signal) === resource.accountIdentity) return boat.withoutApi();
+  throw new Error("Boat login changed. Restore the account that created this machine before managing it.");
 }
 
 export function resourceFrom(allocation: Allocation): Resource {
@@ -125,11 +128,14 @@ export function lifecycle(bb: BbPluginApi, config: () => Promise<Config>, client
           await context.checkpoint(resource);
           verified = await ownedClient(client, resource, signal);
           await verified.resume(resource.sandboxId, resource.ttlSeconds, signal);
+          // A first attempt that found snapshots off failed after saving the ID;
+          // a retry must not enroll a machine that could never sleep.
+          if ((await verified.info(resource.sandboxId, signal)).snapshots === false) throw new Error(`Boat ${resource.sandboxId} has snapshots off, so sleep would erase it. Remove this machine.`);
           stages.resume = Date.now() - startedAt;
         } else {
           const current = { ...await config(), ...inputsSchema.parse(context.inputs) };
           const boat = await client(current.scope);
-          const [, accountIdentity] = await Promise.all([boat.preflight(signal), boat.accountIdentity(signal), boat.checkTransportsMatch(signal)]);
+          const [, accountIdentity] = await Promise.all([boat.preflight(signal), boat.verifiedAccountIdentity(signal)]);
           stages.preflight = Date.now() - startedAt;
           const pending = {
             key: context.key, scope: current.scope, accountIdentity, sandboxId: null, ttlSeconds: current.ttlSeconds,
