@@ -90,13 +90,16 @@ export function previews(bb: BbPluginApi, client: BoatFactory, lifetime: AbortSi
       if (port === null) throw new Error("App is not ready. Start it first or use bb boat dev; pass --port for apps without Pitchfork. Any started terminal remains available for inspection.");
       const key = previewKey(host.id, port);
       const previous = recordSchema.safeParse(await bb.storage.kv.get(key));
-      const existing = await boat.hostedPort(resource.sandboxId, port, signal);
+      const route = await boat.route(resource.sandboxId, port, signal);
+      const existing = route.hosted;
+      // Keep an existing relay; otherwise relay only apps bound to loopback.
+      const localhost = route.localhost || await boat.portBinding(resource.sandboxId, port, signal) === "loopback";
       // Before claiming a route, persist ownership so a lost response/reload can clean it up.
       const record = { hostId: host.id, environmentId: environment.id, threadId: options.threadId, port,
         terminalId: terminalId ?? (previous.success ? previous.data.terminalId : null),
         owned: !existing || (previous.success && previous.data.owned) };
       await bb.storage.kv.set(key, record);
-      const url = await boat.hostPreview(resource.sandboxId, port, signal);
+      const url = await boat.hostPreview(resource.sandboxId, port, signal, localhost);
       await bb.storage.kv.set(idleKey(host.id), Date.now());
       const { browser, matched, browserTarget } = reveal
         ? await revealUrl(bb, url, options)

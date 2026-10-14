@@ -6,10 +6,32 @@ import { allocationSchema, inputsSchema, resourceSchema, providerId, type Alloca
 export type BoatFactory = (scope: string) => Promise<Boat>;
 export const allocationStorageKey = (key: string) => `allocation/${createHash("sha256").update(key).digest("hex")}`;
 export const idleKey = (hostId: string) => `idle/${hostId}`;
+export const expiryWakeKey = (hostId: string) => `expiry-wake/${hostId}`;
+export const expiryWarningKey = (hostId: string) => `expiry-warning/${hostId}`;
+// Boat counts disk retention from the stop's snapshot; BB's suspension time
+// is the fallback, and is never earlier than the stop.
+export function expiryStart(snapshotCompletedAt: string | null | undefined, suspendedAt: number | null): number | null {
+  const snapshot = snapshotCompletedAt ? Date.parse(snapshotCompletedAt) : NaN;
+  if (Number.isFinite(snapshot)) return snapshot;
+  return suspendedAt ?? null;
+}
 export async function ownedClient(client: BoatFactory, resource: Pick<Resource, "scope" | "accountIdentity">, signal: AbortSignal): Promise<Boat> {
   const boat = await client(resource.scope);
-  if (await boat.accountIdentity(signal) !== resource.accountIdentity) throw new Error("Boat login changed. Restore the account that created this machine before managing it.");
-  return boat;
+  if (await boat.accountIdentity(signal) === resource.accountIdentity) return boat;
+  // A machine pinned through the CLI keeps working if the API cannot
+  // reproduce its identity exactly; it is then managed through the CLI.
+  if (boat.rest && await boat.cliAccountIdentity(signal) === resource.accountIdentity) return boat.withoutApi();
+  throw new Error("Boat login changed. Restore the account that created this machine before managing it.");
+}
+
+export function resourceFrom(allocation: Allocation): Resource {
+  const { key, scope, accountIdentity, sandboxId, ttlSeconds } = allocation;
+  return resourceSchema.parse({ version: 1, key, scope, accountIdentity, sandboxId, ttlSeconds });
+}
+// Boat keeps idempotency keys for 24 hours; leave margin for clock skew.
+const IDEMPOTENCY_WINDOW_MS = 23 * 60 * 60_000;
+function retriable(boat: Boat, allocation: Allocation): allocation is Allocation & { request: NonNullable<Allocation["request"]> } {
+  return boat.rest !== undefined && allocation.requestedVia === "api" && allocation.request !== undefined && allocation.requestedAt !== undefined && Date.now() < allocation.requestedAt + IDEMPOTENCY_WINDOW_MS;
 }
 
 export function lifecycle(bb: BbPluginApi, config: () => Promise<Config>, client: BoatFactory, lifetime: AbortSignal) {
@@ -43,6 +65,8 @@ export function lifecycle(bb: BbPluginApi, config: () => Promise<Config>, client
     // and the enrollment bundle always does. Only the stage total is measurable.
     const { hostId } = await bb.experimental_machines.bootstrap({ key: resource.key, executor: boat.executor(resource.sandboxId), report, signal });
     await kv.set(idleKey(hostId), Date.now());
+    // Waking restarts Boat's 14-day disk retention.
+    await Promise.all([kv.delete(expiryWakeKey(hostId)), kv.delete(expiryWarningKey(hostId))]);
     return { hostId, prepareMs, bootstrapMs: Date.now() - bootstrapStartedAt };
   }
   function logTimings(operation: string, resource: Resource, report: MachineBootstrapRequest["report"], startedAt: number, stages: Record<string, number>) {
@@ -78,33 +102,48 @@ export function lifecycle(bb: BbPluginApi, config: () => Promise<Config>, client
         let allocation = await read(context.key);
         let resource: Resource;
         let verified: Boat | undefined;
-        if (allocation) {
-          if (!allocation.sandboxId) throw new Error(`Uncertain Boat allocation ${context.key}. Use bb boat allocations, then recover or clear it after checking Boat. No second sandbox was created.`);
-          resource = resourceSchema.parse({ ...allocation, version: 1 });
+        // Persist intent before creating; a lost response must never cause a
+        // second sandbox on retry. Through the API, the allocation key is also
+        // Boat's idempotency key, so the same request returns the same sandbox.
+        const allocate = async (boat: Boat, pending: Allocation & { request: NonNullable<Allocation["request"]> }) => {
+          context.report.step("Creating the Boat sandbox");
+          const createStartedAt = Date.now();
+          let saved: Resource | undefined;
+          await boat.create(pending.request, context.key, signal, async (sandboxId) => {
+            saved = resourceFrom({ ...pending, sandboxId });
+            await kv.set(allocationStorageKey(context.key), { ...pending, sandboxId });
+            await context.checkpoint(saved);
+          });
+          if (!saved) throw new Error("Boat allocation was not checkpointed.");
+          stages.sandbox = Date.now() - createStartedAt;
+          return saved;
+        };
+        if (allocation && !allocation.sandboxId) {
+          const boat = await ownedClient(client, allocation, signal);
+          if (!retriable(boat, allocation)) throw new Error(`Uncertain Boat allocation ${context.key}. Use bb boat allocations, then recover or clear it after checking Boat. No second sandbox was created.`);
+          resource = await allocate(boat, allocation);
+          verified = boat;
+        } else if (allocation?.sandboxId) {
+          resource = resourceFrom(allocation);
           await context.checkpoint(resource);
           verified = await ownedClient(client, resource, signal);
           await verified.resume(resource.sandboxId, resource.ttlSeconds, signal);
+          // A first attempt that found snapshots off failed after saving the ID;
+          // a retry must not enroll a machine that could never sleep.
+          if ((await verified.info(resource.sandboxId, signal)).snapshots === false) throw new Error(`Boat ${resource.sandboxId} has snapshots off, so sleep would erase it. Remove this machine.`);
           stages.resume = Date.now() - startedAt;
         } else {
           const current = { ...await config(), ...inputsSchema.parse(context.inputs) };
           const boat = await client(current.scope);
-          const [, accountIdentity] = await Promise.all([boat.preflight(signal), boat.accountIdentity(signal)]);
+          const [, accountIdentity] = await Promise.all([boat.preflight(signal), boat.verifiedAccountIdentity(signal)]);
           stages.preflight = Date.now() - startedAt;
-          allocation = { key: context.key, scope: current.scope, accountIdentity, sandboxId: null, ttlSeconds: current.ttlSeconds };
-          // Boat has no create idempotency key. Persist intent before new; a lost
-          // response must never cause a second sandbox on retry.
-          await kv.set(allocationStorageKey(context.key), allocation);
-          context.report.step("Creating the Boat sandbox");
-          const createStartedAt = Date.now();
-          let saved: Resource | undefined;
-          await boat.create(current, context.key, signal, async (sandboxId) => {
-            saved = { ...allocation!, sandboxId, version: 1 };
-            await kv.set(allocationStorageKey(context.key), { ...allocation, sandboxId });
-            await context.checkpoint(saved);
-          });
-          if (!saved) throw new Error("Boat allocation was not checkpointed.");
-          resource = saved;
-          stages.sandbox = Date.now() - createStartedAt;
+          const pending = {
+            key: context.key, scope: current.scope, accountIdentity, sandboxId: null, ttlSeconds: current.ttlSeconds,
+            request: { environment: current.environment, machineType: current.machineType, ttlSeconds: current.ttlSeconds, snapshot: current.snapshot, monitoring: current.monitoring },
+            requestedAt: Date.now(), requestedVia: boat.transport,
+          };
+          await kv.set(allocationStorageKey(context.key), pending);
+          resource = await allocate(boat, pending);
           verified = boat;
         }
         const connected = await connect(resource, context.report, signal, verified);
@@ -117,7 +156,7 @@ export function lifecycle(bb: BbPluginApi, config: () => Promise<Config>, client
         const allocation = await read(context.key);
         if (!allocation) return { status: "removed" };
         if (!allocation.sandboxId) return { status: "failed", message: `Boat allocation ${context.key} is uncertain. Run bb boat allocations and reconcile before cleanup.` };
-        await remove(resourceSchema.parse({ ...allocation, version: 1 }), signalFor(context.signal));
+        await remove(resourceFrom(allocation), signalFor(context.signal));
         return { status: "removed" };
       });
     },
@@ -145,7 +184,7 @@ export function lifecycle(bb: BbPluginApi, config: () => Promise<Config>, client
       const resource = resourceSchema.parse(context.resource);
       return exclusive(resource.key, async () => {
         await remove(resource, signalFor(context.signal));
-        await kv.delete(idleKey(context.hostId));
+        await Promise.all([idleKey, expiryWakeKey, expiryWarningKey].map((key) => kv.delete(key(context.hostId))));
         return { status: "removed" };
       });
     },

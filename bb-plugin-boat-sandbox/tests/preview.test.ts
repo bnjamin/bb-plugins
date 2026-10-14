@@ -18,8 +18,11 @@ class FakeBoat extends Boat {
   override async accountIdentity() { return this.account; }
   override async previewPort(_: string, cwd: string) { assert.equal(cwd, "/remote/project"); return this.port; }
   override async portReady() { return this.ready; }
-  override async hostedPort() { return this.existing; }
-  override async hostPreview(_: string, port: number) { this.calls.push(`host:${port}`); return secretUrl; }
+  relayed = false;
+  binding: "address" | "loopback" | "none" = "address";
+  override async route() { return { hosted: this.existing, localhost: this.relayed }; }
+  override async portBinding() { return this.binding; }
+  override async hostPreview(_: string, port: number, __: AbortSignal, localhost = false) { this.calls.push(`host:${port}${localhost ? ":localhost" : ""}`); return secretUrl; }
   override async hidePreview(_: string, port: number) { this.calls.push(`hide:${port}`); }
 }
 async function fixture() {
@@ -183,7 +186,7 @@ test("Boat status discovery parses assigned ports and treats down routes as unow
   });
   const signal = new AbortController().signal;
   assert.equal(await boat.previewPort("bx_test", "/project with spaces", "rails", signal), 3017);
-  assert.equal(await boat.hostedPort("bx_test", 3017, signal), false);
+  assert.deepEqual(await boat.route("bx_test", 3017, signal), { hosted: false, localhost: false });
   assert.match(requests[0]!, /cd '\/project with spaces'/);
 });
 
@@ -333,4 +336,53 @@ test("UI sharing respects project defaults without opening a server-side desktop
   for (const key of await f.bb.storage.kv.list()) assert.doesNotMatch(JSON.stringify(await f.bb.storage.kv.get(key)), /private-token/);
   f.host.machineProviderId = "other";
   await assert.rejects(f.harness.behavior.callRpc("share", { threadId: "thread1" }), /not on a Boat/);
+});
+
+test("loopback-only apps get Boat's localhost relay; apps on the sandbox address never do", async (t) => {
+  for (const [binding, relayed, expected] of [["loopback", false, "host:3017:localhost"], ["address", false, "host:3017"], ["address", true, "host:3017:localhost"]] as const) {
+    const f = await fixture();
+    t.after(() => f.harness.lifecycle.dispose());
+    f.boat.binding = binding;
+    f.boat.relayed = relayed;
+    await f.manager.open({ threadId: "thread1", daemon: "rails", start: false, includeUrl: false }, new AbortController().signal);
+    assert.deepEqual(f.boat.calls, [expected]);
+  }
+});
+
+test("hosting requests the relay through the CLI or the API and explains an old CLI", async () => {
+  const signal = new AbortController().signal;
+  const cli = new Boat("boat", "personal", async (_, args) => {
+    assert.deepEqual(args.slice(4), ["host", "bx_test", "5173", "--private", "--title", "BB app preview", "--localhost"]);
+    return { exitCode: 2, stdout: "", stderr: "error: unexpected argument '--localhost'" };
+  });
+  await assert.rejects(cli.hostPreview("bx_test", 5173, signal, true), /listens only on localhost.*boat self-update/);
+  const route = new Boat("boat", "personal", async () => ({ exitCode: 0, stdout: JSON.stringify({ exitCode: 0, stdout: "5173 https://app-5173.on.boat.dev (gated) (localhost) BB app preview" }), stderr: "" }));
+  assert.deepEqual(await route.route("bx_test", 5173, signal), { hosted: true, localhost: true });
+});
+
+test("port binding tells loopback-only apps from apps on the sandbox address", async (t) => {
+  const { createServer } = await import("node:net");
+  const { networkInterfaces } = await import("node:os");
+  if (!Object.values(networkInterfaces()).flat().some((i) => i && i.family === "IPv4" && !i.internal)) return t.skip("no external IPv4 interface");
+  // Runs the probe locally, standing in for `boat exec`.
+  const boat = new Boat("boat", "personal", async (_, args) => {
+    const { spawnSync } = await import("node:child_process");
+    const result = spawnSync("bash", ["-c", args.at(-1)!], { encoding: "utf8" });
+    return { exitCode: 0, stdout: JSON.stringify({ exitCode: result.status ?? 1, stdout: result.stdout }), stderr: "" };
+  });
+  const signal = new AbortController().signal;
+  for (const [host, expected] of [["127.0.0.1", "loopback"], ["0.0.0.0", "address"]] as const) {
+    const server = createServer().listen(0, host);
+    await new Promise((resolve) => server.once("listening", resolve));
+    const port = (server.address() as { port: number }).port;
+    try { assert.equal(await boat.portBinding("bx_test", port, signal), expected); }
+    finally { server.close(); }
+  }
+});
+
+test("a command's own failure is a result, not a CLI failure", async () => {
+  const boat = new Boat("boat", "personal", async () => ({ exitCode: 3, stdout: JSON.stringify({ exitCode: 3, stdout: "", stderr: "" }), stderr: "" }));
+  assert.deepEqual(await boat.previewExec("bx_test", "exit 3", new AbortController().signal), { exitCode: 3, stdout: "" });
+  const broken = new Boat("boat", "personal", async () => ({ exitCode: 1, stdout: '{"code":"not_found","error":"not found","event":"error","status":404}', stderr: "" }));
+  await assert.rejects(broken.previewExec("bx_test", "true", new AbortController().signal), /did not finish/);
 });

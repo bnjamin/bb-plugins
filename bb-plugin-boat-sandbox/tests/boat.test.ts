@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, readFile, rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { Boat, BoatCommandError } from "../boat.js";
+import { Boat, BoatCommandError, PRE_STOP_SCRIPT } from "../boat.js";
 import { configSchema } from "../config.js";
 import { run, shellQuote, type Runner, type RunResult } from "../process.js";
 
@@ -224,4 +224,89 @@ esac
   // A guard failure is reported as preparation, not as the hook.
   await writeFile(join(bin, "node"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
   await assert.rejects(boat.prepare("bx_test", signal()), /Boat preparation failed/);
+});
+
+test("snapshots off is refused before allocation and before any stop", async () => {
+  const preflight = new Boat("boat", "personal", async (_, args) => args[4] === "data-retention"
+    ? ok({ enabled: false, snapshotsOff: true })
+    : ok({ canStart: true }));
+  await assert.rejects(preflight.preflight(signal()), /Snapshots off/);
+  const operations: string[] = [];
+  const stopping = new Boat("boat", "personal", async (_, args) => {
+    operations.push(args[4]!);
+    if (args[4] === "data-retention") return ok({ enabled: false });
+    return ok({ sandbox: { id: "bx_test", state: "ready", snapshots: false } });
+  });
+  await assert.rejects(stopping.stop("bx_test", signal()), /snapshots off; stopping it would erase/);
+  assert.deepEqual(operations, ["data-retention", "info"], "neither the hook nor the stop may run");
+});
+
+test("a sandbox created with snapshots off fails creation after its allocation is saved", async () => {
+  const saved: string[] = [];
+  const boat = new Boat("boat", "personal", async (_, args, options) => {
+    if (args[4] === "new") { await options.onLine!(JSON.stringify({ event: "created", id: "bx_test" })); return ok({}); }
+    return ok({ sandbox: { id: "bx_test", state: "ready", snapshots: false } });
+  });
+  await assert.rejects(boat.create(configSchema.parse({}), "launch1", signal(), async (id) => { saved.push(id); }), /snapshots off/);
+  assert.deepEqual(saved, ["bx_test"]);
+});
+
+test("an expired stopped disk explains why the machine cannot wake", async () => {
+  const boat = new Boat("boat", "personal", async (_, args) => {
+    if (args[4] === "info") return ok({ sandbox: { id: "bx_test", state: "stopped", snapshotAvailable: true } });
+    if (args[4] === "resume") return { exitCode: 1, stdout: '{"event":"error","error":{"code":"snapshot_data_expired","message":"secret-bearing detail"},"status":409}', stderr: "" };
+    return ok({ enabled: false, canStart: true });
+  });
+  await assert.rejects(boat.resume("bx_test", 3600, signal()), (error: Error) => {
+    assert.match(error.message, /asleep for more than 14 days/);
+    assert.doesNotMatch(error.message, /secret-bearing/);
+    return true;
+  });
+});
+
+test("before-suspend leaves a marker so Boat's pre-stop does not rerun the hook", async () => {
+  const boat = new Boat("boat", "personal", async (_, __, options) => {
+    assert.match(options.stdin!, /bash "\$hook"; fi\nmkdir -p "\$HOME\/.cache\/bb-boat"\ntouch "\$HOME\/.cache\/bb-boat\/before-suspend.ran"/);
+    return ok({});
+  });
+  await boat.hook("bx_test", "before-suspend", signal());
+  const prepare = new Boat("boat", "personal", async (_, __, options) => {
+    assert.doesNotMatch(options.stdin!, /before-suspend.ran/);
+    return ok({});
+  });
+  await prepare.hook("bx_test", "prepare", signal());
+});
+
+test("preparation installs Boat's pre-stop hook without replacing a template's own", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "bb-boat-prestop-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bin = join(root, "bin");
+  await mkdir(bin);
+  await writeFile(join(bin, "findmnt"), "#!/bin/sh\nprintf '/dev/vda1[/home]\\n'\n", { mode: 0o755 });
+  await writeFile(join(bin, "sysctl"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  const env = { ...process.env, HOME: root, PATH: `${bin}:${process.env.PATH}` };
+  const boat = new Boat("boat", "personal", async (_, __, options) => {
+    const result = spawnSync("bash", ["-s"], { input: options.stdin, encoding: "utf8", timeout: 5000, env });
+    if (result.error) throw result.error;
+    return { exitCode: result.status ?? 1, stdout: result.stdout, stderr: result.stderr };
+  });
+  const preStop = join(root, ".boat/pre-stop");
+  await boat.prepare("bx_test", signal());
+  assert.equal(await readFile(preStop, "utf8"), PRE_STOP_SCRIPT);
+  // Boat's auto-stop runs the hook; a fresh marker from a BB suspend skips it once.
+  await mkdir(join(root, ".config/bb-boat"), { recursive: true });
+  await writeFile(join(root, ".config/bb-boat/before-suspend"), 'echo ran >> "$HOME/hook-runs"\n');
+  const runPreStop = () => assert.equal(spawnSync(preStop, [], { env, encoding: "utf8" }).status, 0);
+  runPreStop();
+  await mkdir(join(root, ".cache/bb-boat"), { recursive: true });
+  await writeFile(join(root, ".cache/bb-boat/before-suspend.ran"), "");
+  runPreStop();
+  runPreStop();
+  assert.equal(await readFile(join(root, "hook-runs"), "utf8"), "ran\nran\n");
+  // A template's own pre-stop is preserved and reported.
+  await writeFile(preStop, "#!/bin/bash\necho mine\n");
+  const progress: string[] = [];
+  await boat.prepare("bx_test", signal(), { step: () => {}, log: (text) => progress.push(text) });
+  assert.equal(await readFile(preStop, "utf8"), "#!/bin/bash\necho mine\n");
+  assert.ok(progress.some((text) => /template's own ~\/.boat\/pre-stop was left unchanged/.test(text)));
 });
