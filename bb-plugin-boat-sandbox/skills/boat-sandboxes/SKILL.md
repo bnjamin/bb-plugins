@@ -43,7 +43,25 @@ stop the machine without BB's drain. On restart the maintenance sweep reconciles
 stopped machines. App processes need restarting after wake; disk snapshots do
 not preserve running processes. Keep persistent data under `/home/user` and ensure
 it is readable by the sandbox user. Do not exclude BB identity/workspace files
-with `.boxignore`. Boat delete-on-stop must be disabled.
+with `.boatignore`. Boat delete-on-stop and Snapshots off must both be disabled;
+either makes a stop erase the sandbox, so the plugin refuses them.
+
+Boat deletes a stopped sandbox's disk 14 days after the stop. The sweep briefly
+wakes machines asleep for `wakeBeforeExpiryDays` (default 12; requires idle sleep)
+so idle sleep stops them again and the 14 days restart. `bb boat inspect` shows
+`diskExpiresAt`. Once the disk is gone the machine cannot wake; remove it. A Boat
+sandbox found running while BB has its machine asleep is reconciled through
+`bb machine reconcile`, which saves and stops it.
+
+An optional `apiKey` secret setting (a `ci`-preset `boat_…` key for the same
+account as the CLI login) moves lifecycle calls to Boat's REST API; SSH stays on
+the CLI. `bb boat doctor --json` reports `transport`, checks that both belong to
+one account, and warns when the environment passes Boat credentials into
+sandboxes. Through the API, a sandbox in `error` gets one recover (power-cycle,
+disk untouched); never resume an errored sandbox without the user's consent,
+since that loses work after its last snapshot. A suspend that fails with "Boat
+could not save" means Boat refused the stop and keeps retrying it for up to 3
+days; BB marks the machine asleep when Boat finishes.
 
 Like the Modal provider, machines are ephemeral: removing their last live thread
 can delete the sandbox and its ordinary snapshots. Named templates are not deleted.
@@ -65,8 +83,11 @@ failure fails the lifecycle operation. Inspect or run the failing hook on the
 machine; never print credentials while troubleshooting. Templates commonly
 start a database detached from the prepare hook and provide a wait command;
 read the machine's `~/.bb-machines/<server-host>/AGENTS.md` for its name and
-run it before database work. Boat TTL stops bypass BB's shutdown hook, so data
-must also support crash recovery.
+run it before database work. Preparation installs Boat's `~/.boat/pre-stop`,
+which runs `before-suspend` on Boat's own TTL stops too, limited to 60 seconds and
+non-blocking; it skips once after a BB suspend already ran the hook. A template's
+own `~/.boat/pre-stop` is left alone and should call the hook. Data must still
+support crash recovery.
 
 A template can also carry the project checkout at BB's default path
 (`~/.bb-machines/<server-host>/checkouts/project-<project-id>`, adopted instead
@@ -105,9 +126,11 @@ a reusable template, or copy desktop credential files without authorization.
 
 ## Uncertain creation
 
-Boat has no create idempotency key. The plugin stores allocation intent before
-creating and checkpoints the first returned sandbox ID. After a lost create
-response it first searches for a new sandbox whose `BB_BOAT_ALLOCATION_KEY`
+The plugin stores allocation intent before creating and checkpoints the first
+returned sandbox ID. With an `apiKey` setting, creation uses Boat's API with the
+allocation key as `Idempotency-Key`, and a retry within 24 hours returns the same
+sandbox, so lost responses resolve themselves. Through the CLI (no key), after a
+lost create response it searches for a new sandbox whose `BB_BOAT_ALLOCATION_KEY`
 marker matches and adopts it; only if none exists does it block retries from
 allocating another sandbox.
 
@@ -162,7 +185,9 @@ Run with `--thread <id>` when the CLI has no thread context. With multiple deskt
 windows, pass `--browser-host <id>` and `--browser-instance <id>` from
 `bb browser instances`; never guess which window the user is using.
 
-The app must bind `0.0.0.0` and allow its Boat hostname. These app settings remain
+Apps may bind `0.0.0.0` or localhost only; the plugin detects loopback-only apps
+and uses Boat's localhost relay for them (needs an API key or a current Boat CLI).
+The app must allow its Boat hostname. These app settings remain
 in the repository. Normal output omits the private token. Use `bb boat preview
 --url` only when the user needs the coworker-sharing URL; keep it out of logs and
 public messages. Coworkers need the URL and the app's own login, not a BB login.

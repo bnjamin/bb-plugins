@@ -211,3 +211,31 @@ exercised by core on the first thread start and was not part of this run.
   now show specific guidance without exposing raw transport errors or tokens.
 - Live visual verification was unavailable: the computer-use tool denied access
   to the BB application. No existing application preview was stopped.
+
+## REST transport and Boat platform features — 2026-10-14
+
+Boat CLI 1.0.9 on the BB server, with a `ci`-preset API key for the same Personal
+account. Typecheck, 74 automated tests and `bb plugin build` passed. A live script
+drove the plugin's `Boat` class against disposable `small` sandboxes, deleting
+each in `finally`; all four test sandboxes were confirmed gone (`404`) afterwards.
+
+- `GET /me` `user.email` equals the CLI's `account.identifier`, so the account
+  fingerprint of existing machines is unchanged through the API.
+- `X-Boat-Org: personal` is accepted. `boat data-retention status` in 1.0.9
+  already reports `snapshotsOff`.
+- Create through the API returned a sandbox with `snapshots: true`; a second
+  `POST /sandboxes` with the same `Idempotency-Key` and body returned the same
+  sandbox ID.
+- Preparation over SSH installed the managed `~/.boat/pre-stop`.
+- An app bound to `127.0.0.1` was detected as loopback-only, hosted with
+  `localhost: true`, listed as `(localhost)`, and its protected URL answered
+  (`302`, Boat's token redirect; the app response behind it was not fetched).
+- Stop reached `archived` with `snapshotAvailable: true` and stop status
+  `completed`; resume returned to `idle`.
+- Found live: `boat exec` exits with the remote command's exit code. Preview
+  commands now read the JSON result regardless (this also affected readiness
+  probes and Pitchfork discovery when a check failed).
+
+Not exercised live: BB enrollment through the API transport, refused stops,
+`error` recovery, the 14-day wake, and suspended-machine reconciliation; these
+are covered by fake-host and scripted-API tests.

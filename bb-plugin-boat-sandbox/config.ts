@@ -21,12 +21,15 @@ export const inputsSchema = z.object({
 }).strict().default({});
 export const configSchema = z.object({
   cliPath: z.string().default(""),
+  apiKey: z.string().trim().default(""),
   scope: name.default("personal"),
   environment: name.default("base"),
   snapshot: z.union([name, z.literal("")]).default(""),
   machineType: z.enum(["small", "default", "large", "xlarge"]).default("default"),
   ttlSeconds: z.number().int().min(1800).max(7200).default(3600),
   idleMinutes: z.number().int().min(0).max(1440).default(30),
+  wakeBeforeExpiryDays: z.number().int().min(0).max(13).default(12),
+  monitoring: z.boolean().default(true),
   developmentCommand: developmentCommand.default(""),
   developmentPort: developmentPort.default(0),
   developmentDaemon: developmentDaemon.default("rails"),
@@ -38,6 +41,7 @@ export const settingsDescriptors = {
   developmentPort: { type: "number", label: "Development port", default: 0, experimental_schema: developmentPort, description: "App port. 0 discovers the selected Pitchfork daemon's port." },
   developmentDaemon: { type: "string", label: "Development daemon", default: "rails", experimental_schema: developmentDaemon, description: "Pitchfork daemon used when the port is 0." },
   projectDevelopment: { type: "string", label: "Project development overrides", default: "{}", experimental_multiline: true, experimental_schema: projectDevelopmentJson, description: 'JSON keyed by BB project ID, e.g. {"proj_example":{"command":"npm run dev -- --host 0.0.0.0","port":5173}}. Omitted fields inherit defaults; command "" disables share startup and port 0 enables discovery.' },
+  apiKey: { type: "string", secret: true, label: "Boat API key", default: "", description: "Optional boat_… key for the same account as the Boat CLI login. With it, lifecycle calls use Boat's API and creation is idempotent; SSH still uses the CLI. Use a ci-preset key." },
   cliPath: { type: "string", label: "Boat CLI path", default: "", description: "Server-local executable. Blank searches PATH and ~/.ascii/bin/boat." },
   scope: { type: "string", label: "Billing scope", default: "personal", experimental_schema: name, description: "personal or a Boat organization ID. Existing machines retain their original scope." },
   environment: { type: "string", label: "Boat environment", default: "base", experimental_schema: name, description: "Existing named Boat environment used for credentials and tools." },
@@ -45,6 +49,8 @@ export const settingsDescriptors = {
   machineType: { type: "select", label: "Machine size", options: ["small", "default", "large", "xlarge"], default: "default" },
   ttlSeconds: { type: "number", label: "Runtime lease (seconds)", default: 3600, experimental_schema: z.number().int().min(1800).max(7200), description: "Renewed while BB is running; Boat auto-stops if BB goes offline." },
   idleMinutes: { type: "number", label: "Sleep after idle minutes", default: 30, experimental_schema: z.number().int().min(0).max(1440), description: "0 disables idle sleep. BB coordinates sleep with running work." },
+  monitoring: { type: "boolean", label: "Boat process monitoring", default: true, description: "Off creates sandboxes whose process output, command history and metrics Boat does not keep (72 hours otherwise). Boat then also cannot show disk-full alerts or why a sandbox was lost. Needs an API key or a current Boat CLI." },
+  wakeBeforeExpiryDays: { type: "number", label: "Wake sleeping machines after days", default: 12, experimental_schema: z.number().int().min(0).max(13), description: "Boat deletes a stopped sandbox's disk 14 days after it stops. Briefly wake a machine asleep this many days so Boat keeps it; idle sleep stops it again. Needs idle sleep. 0 only warns." },
 } satisfies PluginSettingDescriptors;
 
 export function developmentDefaults(config: Config, projectId: string) {
@@ -73,5 +79,11 @@ export const allocationSchema = z.object({
   accountIdentity: z.string().min(1),
   ttlSeconds: z.number().int().min(1800).max(7200),
   sandboxId: resourceSchema.shape.sandboxId.nullable(),
+  // The exact create request and when it was first sent, so an uncertain
+  // allocation can be retried with Boat's idempotency key (kept 24 hours).
+  request: z.object({ environment: name, machineType: z.enum(["small", "default", "large", "xlarge"]), ttlSeconds: z.number().int(), snapshot: z.union([name, z.literal("")]), monitoring: z.boolean().optional() }).optional(),
+  requestedAt: z.number().optional(),
+  // Only a request first sent through the API carried the idempotency key.
+  requestedVia: z.enum(["api", "cli"]).optional(),
 });
 export type Allocation = z.infer<typeof allocationSchema>;

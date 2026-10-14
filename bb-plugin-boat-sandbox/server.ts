@@ -1,9 +1,11 @@
 import { previews, parsePreviewArgs } from "./preview.js";
 import { shareContract } from "./share-rpc.js";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import { Boat, resolveCli, stoppedStates } from "./boat.js";
-import { configSchema, settingsDescriptors, developmentDefaults, providerId, resourceSchema } from "./config.js";
-import { lifecycle, idleKey, ownedClient, type BoatFactory } from "./lifecycle.js";
+import { run } from "./process.js";
+import { BoatRest } from "./rest.js";
+import { Boat, resolveCli, runningStates, stoppedStates, STOPPED_DISK_RETENTION_MS } from "./boat.js";
+import { configSchema, settingsDescriptors, developmentDefaults, providerId, resourceSchema, type Config } from "./config.js";
+import { lifecycle, idleKey, expiryWakeKey, expiryWarningKey, expiryStart, ownedClient, type BoatFactory } from "./lifecycle.js";
 
 export function createPlugin(factory?: BoatFactory) {
   return async (bb: BbPluginApi) => {
@@ -11,7 +13,10 @@ export function createPlugin(factory?: BoatFactory) {
     const config = async () => configSchema.parse(await settings.get());
     const lifetime = new AbortController();
     bb.onDispose(() => lifetime.abort());
-    const client: BoatFactory = factory ?? (async (scope) => new Boat(await resolveCli((await config()).cliPath), scope));
+    const client: BoatFactory = factory ?? (async (scope) => {
+      const current = await config();
+      return new Boat(await resolveCli(current.cliPath), scope, run, current.apiKey ? new BoatRest(current.apiKey, scope) : undefined);
+    });
     const preview = previews(bb, client, lifetime.signal);
     bb.rpc.register(shareContract, {
       async share({ threadId }) {
@@ -47,6 +52,44 @@ export function createPlugin(factory?: BoatFactory) {
         }
       }
     });
+    type Host = Awaited<ReturnType<typeof bb.sdk.hosts.list>>[number];
+    // A machine BB has asleep must not have running compute: a failed stop, a
+    // crash before the checkpoint or a manual `boat resume` would bill silently.
+    // Reconciling makes core run suspend again, which saves and stops it.
+    // Stopped disks expire after 14 days, so long sleepers are briefly woken.
+    async function maintainSleeping(host: Host, current: Config) {
+      try {
+        const signal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(45_000)]);
+        const resource = resourceSchema.parse(await bb.experimental_machines.getResource(host.id));
+        const state = await (await ownedClient(client, resource, signal)).info(resource.sandboxId, signal);
+        if (runningStates.has(state.state)) {
+          bb.log.warn(`Boat ${resource.sandboxId} is running while BB has ${host.id} asleep; asking BB to save and stop it.`);
+          await bb.sdk.hosts.experimental_reconcile({ hostId: host.id });
+          return;
+        }
+        if (!stoppedStates.has(state.state)) return;
+        const stoppedAt = expiryStart(state.snapshotCompletedAt, host.lifecycle.suspendedAt);
+        if (stoppedAt === null) return;
+        const asleepDays = Math.floor((Date.now() - stoppedAt) / 86_400_000);
+        const wakes = current.wakeBeforeExpiryDays > 0 && current.idleMinutes > 0;
+        if (wakes && asleepDays >= current.wakeBeforeExpiryDays) {
+          // One attempt per six hours: a failing wake must not spend a start every minute.
+          const attemptedAt = await bb.storage.kv.get<number>(expiryWakeKey(host.id));
+          if (attemptedAt !== undefined && Date.now() < attemptedAt + 6 * 60 * 60_000) return;
+          await bb.storage.kv.set(expiryWakeKey(host.id), Date.now());
+          bb.log.info(`Waking ${host.id} after ${asleepDays} days asleep so Boat keeps its saved disk; idle sleep stops it again.`);
+          await bb.sdk.hosts.experimental_resume({ hostId: host.id });
+          return;
+        }
+        if (!wakes && asleepDays >= 11 && await bb.storage.kv.get<number>(expiryWarningKey(host.id)) !== asleepDays) {
+          await bb.storage.kv.set(expiryWarningKey(host.id), asleepDays);
+          bb.log.warn(`${host.id} has been asleep ${asleepDays} days. Boat deletes its saved disk after 14 days; wake it with bb machine resume ${host.id} to keep it.`);
+        }
+      } catch (error) {
+        if (lifetime.signal.aborted) return;
+        bb.log.warn(`Boat maintenance failed for sleeping ${host.id}; it will retry next minute. Run bb boat inspect ${host.id}.`);
+      }
+    }
     let sweeping = false;
     bb.background.schedule("maintain-boat-machines", "* * * * *", async () => {
       if (sweeping) return;
@@ -55,12 +98,22 @@ export function createPlugin(factory?: BoatFactory) {
         await preview.reconcile();
         const current = await config();
         for (const host of await bb.sdk.hosts.list()) {
-          if (host.machineProviderId !== providerId || host.lifecycle.phase !== "active") continue;
+          if (host.machineProviderId !== providerId) continue;
+          if (host.lifecycle.phase === "suspended") {
+            await maintainSleeping(host, current);
+            continue;
+          }
+          if (host.lifecycle.phase !== "active") continue;
           try {
             const signal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(45_000)]);
             const resource = resourceSchema.parse(await bb.experimental_machines.getResource(host.id));
             const boat = await ownedClient(client, resource, signal);
             const state = await boat.info(resource.sandboxId, signal);
+            if (state.state === "error") {
+              const started = await boat.recover(resource.sandboxId, signal);
+              bb.log.warn(`Boat ${resource.sandboxId} for ${host.id} is in error${started ? "; requested a recover (power-cycle, disk untouched)" : ""}. Run bb boat inspect ${host.id}.`);
+              continue;
+            }
             // Mirror an external TTL stop into BB so queued work invokes resume.
             if (stoppedStates.has(state.state)) {
               await bb.sdk.hosts.experimental_suspend({ hostId: host.id });
@@ -142,15 +195,19 @@ export function createPlugin(factory?: BoatFactory) {
               if (args.length) break;
               const current = await config();
               const boat = await client(current.scope);
-              await boat.preflight(signal);
-              return reply({ ok: true, cli: boat.cli, scope: current.scope, environment: current.environment, snapshot: current.snapshot || null, machineType: current.machineType, ttlSeconds: current.ttlSeconds, idleMinutes: current.idleMinutes });
+              const [, , boatCredentials] = await Promise.all([boat.preflight(signal), boat.checkTransportsMatch(signal), boat.passesBoatCredentials(current.environment, signal)]);
+              const warnings = boatCredentials ? [`Boat environment ${current.environment} gives sandboxes a Boat API key, so agents on BB machines can stop, snapshot or resume them. Turn it off with boat env set ${current.environment} --boat-credentials false.`] : [];
+              return reply({ ok: true, cli: boat.cli, transport: boat.transport, boatCredentials, warnings, scope: current.scope, environment: current.environment, snapshot: current.snapshot || null, machineType: current.machineType, ttlSeconds: current.ttlSeconds, idleMinutes: current.idleMinutes });
             }
             case "inspect": {
               if (args.length !== 1) break;
               const host = await bb.sdk.hosts.get({ hostId: args[0]! });
               if (host.machineProviderId !== providerId) throw new Error("That machine is not owned by Boat Sandboxes.");
               const resource = resourceSchema.parse(await bb.experimental_machines.getResource(host.id));
-              return reply({ hostId: host.id, lifecycle: host.lifecycle.phase, ...resource, boat: await (await ownedClient(client, resource, signal)).info(resource.sandboxId, signal) });
+              const boat = await (await ownedClient(client, resource, signal)).info(resource.sandboxId, signal);
+              const stoppedAt = stoppedStates.has(boat.state) ? expiryStart(boat.snapshotCompletedAt, host.lifecycle.suspendedAt) : null;
+              const diskExpiresAt = stoppedAt === null ? null : new Date(stoppedAt + STOPPED_DISK_RETENTION_MS).toISOString();
+              return reply({ hostId: host.id, lifecycle: host.lifecycle.phase, ...resource, diskExpiresAt, boat });
             }
             case "allocations": {
               if (args.length) break;

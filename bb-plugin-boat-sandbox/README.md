@@ -46,7 +46,10 @@ bb machine remove <machine-id>
 
 ## Sign in to your agent
 
-`bb boat doctor` checks Boat access and snapshot retention. A connected BB daemon
+`bb boat doctor` checks Boat access and snapshot retention, reports whether the API
+or the CLI is used, and warns when the Boat environment gives sandboxes a Boat API
+key (agents could then stop or snapshot their own machine; turn it off with
+`boat env set <environment> --boat-credentials false`). A connected BB daemon
 does not mean Codex or Claude is authenticated. The default `base` environment
 can have no agent credentials, and this plugin does not copy your desktop login.
 
@@ -85,11 +88,14 @@ their original billing scope, account fingerprint and runtime lease.
 | --- | --- | --- |
 | `scope` | `personal` | Explicit Personal or organization billing scope |
 | `cliPath` | automatic | Boat executable on the BB server |
+| `apiKey` | empty | Optional `boat_…` API key (secret); lifecycle calls then use Boat's API |
+| `monitoring` | on | Off: Boat keeps no process output, command history or metrics |
 | `environment` | `base` | Existing Boat named environment |
 | `snapshot` | empty | Optional named template for new machines |
 | `machineType` | `default` | `small`, `default`, `large`, or `xlarge`; plan limits apply |
 | `ttlSeconds` | `3600` | Renewable runtime lease, 1800–7200 seconds |
 | `idleMinutes` | `30` | Coordinated idle sleep; 0 disables it |
+| `wakeBeforeExpiryDays` | `12` | Briefly wake machines asleep this long so Boat keeps their disk; 0 only warns |
 
 Per-machine inputs override `environment`, `snapshot` and `machineType`:
 
@@ -151,7 +157,9 @@ so read several samples.
 ## Lifecycle and recovery
 
 While BB is running, a minute sweep renews leases before they approach expiry and
-requests idle sleep through BB's coordinated drain. Thread starts/activity and
+requests idle sleep through BB's coordinated drain. It also checks sleeping
+machines: if a Boat sandbox is running while BB has its machine asleep (a failed
+stop, or a manual `boat resume`), it asks BB to reconcile, which saves and stops it. Thread starts/activity and
 terminal input reset the idle timer. Core may interrupt a long-running turn when
 coordinating suspension, as with Modal. If BB goes offline, Boat's TTL can stop a
 machine independently. The next sweep reconciles that state for resume.
@@ -167,12 +175,27 @@ success. Hooks run as the sandbox user and their output is not sent to BB logs;
 the prepare hook shares the filesystem guard's SSH session, and only the guard's
 own timing line is read back from it. The daemon, checkout and agent all wait
 behind the prepare hook, so keep its synchronous part short: fail fast on lost
-data, and start slow services detached with a wait command for agents. Boat's
-own TTL stop cannot run the plugin's shutdown hook; databases must also tolerate
-crash recovery.
+data, and start slow services detached with a wait command for agents.
+Preparation also installs Boat's native `~/.boat/pre-stop`, which Boat runs before
+the final snapshot of every stop, including its own TTL auto-stop when BB is
+offline. It calls `~/.config/bb-boat/before-suspend`, so the shutdown hook also
+covers those stops, with Boat's limits: 60 seconds, and a failure does not prevent
+the stop. A BB-initiated suspend has already run the hook and leaves a marker so it
+does not run twice; the hook should still be idempotent. A template's own
+`~/.boat/pre-stop` is never replaced; call the hook from it to get the same
+coverage. Databases must still tolerate crash recovery.
 Persistent data should live under `/home/user`, readable by the sandbox user. Do
-not exclude BB's files or checkout with `.boxignore`. Delete-on-stop retention is
-incompatible and is rejected during preflight and suspension.
+not exclude BB's files or checkout with `.boatignore`. Delete-on-stop retention and
+Boat's **Snapshots off** setting erase a sandbox when it stops, so both are
+rejected during preflight; a sandbox created with snapshots off fails creation and
+is never stopped by BB.
+
+Boat keeps a stopped sandbox's disk for **14 days**, then deletes it; waking fails
+from then on. The sweep therefore wakes a machine that has been asleep for
+`wakeBeforeExpiryDays` (default 12), and idle sleep stops it again after
+`idleMinutes`, restarting Boat's 14 days. One wake attempt is made per six hours.
+With idle sleep or waking disabled, the plugin logs a daily warning from day 11
+instead. `bb boat inspect` reports `diskExpiresAt` for a sleeping machine.
 
 Machines are **ephemeral**, matching Modal: BB may remove them after their last
 live thread is removed. Machine deletion permanently deletes the Boat sandbox and
@@ -184,14 +207,35 @@ bb boat inspect <machine-id> --json
 bb boat allocations --json
 ```
 
-Boat offers no create idempotency key. An allocation intent is persisted before
-creation, and the first JSONL `created` ID is saved before enrollment. A retry
-reuses that ID. Every sandbox is created with a `BB_BOAT_ALLOCATION_KEY`
+### Boat API key
+
+With `apiKey` set, account, preflight, create, stop, resume, extend, delete,
+recover, listing and hosting calls use Boat's REST API (`https://boat.dev/api/v1`)
+instead of starting a CLI process for each. SSH (daemon installation, hooks) and
+`host list`/`host hide` still run through the CLI, so the CLI login and the key
+must belong to the same account; `bb boat doctor` and every new allocation check
+this. Use a key with the `ci` preset (`boat api-key create --preset ci`), entered
+as a secret setting. Without a key, everything uses the CLI as before. Machines
+created either way stay manageable by both: the account fingerprint is the same.
+
+Through the API, creation is idempotent: the BB allocation key is sent as Boat's
+`Idempotency-Key`, and the exact request is stored with the allocation. A retry
+after a lost response, within Boat's 24 hours, returns the same sandbox instead of
+leaving the allocation uncertain. Through the API, a sandbox in `error` is
+power-cycled once with Boat's recover (its disk is untouched); a sandbox is never
+resumed automatically from `error`, because that loses work written after the
+last snapshot. When Boat refuses a stop it cannot save, suspension reports Boat's
+reason instead of waiting out a timeout.
+
+### Allocation safety
+
+An allocation intent is persisted before creation, and the first returned
+sandbox ID is saved before enrollment. A retry reuses that ID. Every sandbox is created with a `BB_BOAT_ALLOCATION_KEY`
 environment marker; when Boat's create call fails without returning an ID (its
 CLI has been seen to time out client-side while the sandbox was still created),
 the plugin looks for the single new sandbox carrying this key, verifies the
-marker, and adopts it. Only when that finds nothing does the allocation stay
-uncertain, blocking further allocation and cleanup rather than silently leaking
+marker, and adopts it. Only when that finds nothing, and the allocation cannot
+be retried with the idempotency key, does it stay uncertain, blocking further allocation and cleanup rather than silently leaking
 another machine. See [the agent skill](skills/boat-sandboxes/SKILL.md#uncertain-creation)
 for verified recovery and clearing resolved pending allocations.
 
@@ -254,7 +298,11 @@ thread terminal and waits up to 90 seconds. Failed startup leaves terminal logs
 available. Stop development through that terminal or the app's normal stop command.
 
 Previews use Boat's token-protected hosting and BB's normal desktop browser, not a
-streamed desktop. Apps must listen on `0.0.0.0` and accept their Boat hostname
+streamed desktop. Apps may listen on `0.0.0.0` or only on localhost: the plugin
+checks which, and uses Boat's localhost relay (`--localhost`) for apps bound to
+`127.0.0.1` or `::1`, keeping a relay that is already on. Never relaying an app on
+`0.0.0.0` matters, because the relay would hold its port. The relay needs an API
+key or a current Boat CLI. Apps must accept their Boat hostname
 (`*.on.boat.dev`, or the legacy `*.on.ascii.dev`). App authentication still applies.
 `mise run dev` remains an ordinary repository command; automatic preview comes
 from running `bb boat dev` instead. Port discovery requires mise/Pitchfork; use
@@ -282,8 +330,8 @@ bb boat share --command 'npm run dev -- --host 0.0.0.0' --port 5173
 ```
 
 The command runs in a BB thread terminal with inspectable logs. Sharing never
-rewrites project configuration or stops its daemons. The app must bind
-`0.0.0.0` and allow its Boat hostname. Plain output withholds the token;
+rewrites project configuration or stops its daemons. The app must allow its Boat
+hostname. Plain output withholds the token;
 `bb boat share --url` returns only the private URL, and `--json` returns the
 full result including the tokenized URL and browser target.
 
