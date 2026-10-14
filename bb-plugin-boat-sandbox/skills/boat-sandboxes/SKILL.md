@@ -43,10 +43,10 @@ stop the machine without BB's drain. On restart the maintenance sweep reconciles
 stopped machines. App processes need restarting after wake; disk snapshots do
 not preserve running processes. Keep persistent data under `/home/user` and ensure
 it is readable by the sandbox user. Do not exclude BB identity/workspace files
-with `.boxignore`. Boat delete-on-stop must be disabled.
+with `.boatignore`. Boat delete-on-stop must be disabled.
 
 Like the Modal provider, machines are ephemeral: removing their last live thread
-can delete the sandbox and its ordinary snapshots. Named templates are not deleted.
+can delete the sandbox and its ordinary snapshots (ordinary snapshots expire after 14 days unless snapshots are disabled or refreshed). Named templates are not deleted.
 
 ## Prepared templates and hooks
 
@@ -65,8 +65,8 @@ failure fails the lifecycle operation. Inspect or run the failing hook on the
 machine; never print credentials while troubleshooting. Templates commonly
 start a database detached from the prepare hook and provide a wait command;
 read the machine's `~/.bb-machines/<server-host>/AGENTS.md` for its name and
-run it before database work. Boat TTL stops bypass BB's shutdown hook, so data
-must also support crash recovery.
+run it before database work. While Boat TTL stops bypass BB's shutdown hook (though `~/.boat/pre-stop`
+runs on auto-stop), data must also support crash recovery.
 
 A template can also carry the project checkout at BB's default path
 (`~/.bb-machines/<server-host>/checkouts/project-<project-id>`, adopted instead
@@ -105,11 +105,11 @@ a reusable template, or copy desktop credential files without authorization.
 
 ## Uncertain creation
 
-Boat has no create idempotency key. The plugin stores allocation intent before
-creating and checkpoints the first returned sandbox ID. After a lost create
-response it first searches for a new sandbox whose `BB_BOAT_ALLOCATION_KEY`
-marker matches and adopts it; only if none exists does it block retries from
-allocating another sandbox.
+The Boat CLI has no create idempotency key (the REST API supports `Idempotency-Key`).
+The plugin stores allocation intent before creating and checkpoints the first returned
+sandbox ID. After a lost create response it first searches for a new sandbox whose
+`BB_BOAT_ALLOCATION_KEY` marker matches and adopts it; only if none exists does it block
+retries from allocating another sandbox.
 
 Run `bb boat allocations --json`, then `boat --org <saved-scope> list --all`.
 For a suspected running sandbox, `bb boat recover <allocation-key> <sandbox-id>`

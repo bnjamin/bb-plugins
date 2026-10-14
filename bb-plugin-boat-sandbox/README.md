@@ -133,11 +133,11 @@ prompt on that machine, so it is the place to explain those commands.
 Boat injects an environment's variables (for example `CLAUDE_CODE_OAUTH_TOKEN`
 from its agent credentials) into SSH sessions, but BB's daemon runs as a systemd
 user service and inherits the user manager's environment, which has none of
-them, so agents start logged out. Either store the credential in BB with
-`bb machine env set NAME` (encrypted, synced into every daemon), or have the
-prepare hook run `systemctl --user import-environment NAME…` for the variables
-that are set; the hook runs in an SSH session before the daemon starts on both
-creation and wake.
+them, so agents start logged out. With Boat's AI-credentials proxy enabled,
+placeholder keys rotate on every start, so credentials stored with `bb machine env set NAME`
+go stale after each wake. Instead, have the prepare hook run
+`systemctl --user import-environment NAME…` for the variables that are set;
+the hook runs in an SSH session before the daemon starts on both creation and wake.
 
 ### Launch timing
 
@@ -167,11 +167,12 @@ success. Hooks run as the sandbox user and their output is not sent to BB logs;
 the prepare hook shares the filesystem guard's SSH session, and only the guard's
 own timing line is read back from it. The daemon, checkout and agent all wait
 behind the prepare hook, so keep its synchronous part short: fail fast on lost
-data, and start slow services detached with a wait command for agents. Boat's
-own TTL stop cannot run the plugin's shutdown hook; databases must also tolerate
-crash recovery.
+data, and start slow services detached with a wait command for agents. While
+Boat's own TTL stop cannot run the plugin's shutdown hook (though `~/.boat/pre-stop`
+runs on auto-stop), databases must also tolerate crash recovery. Note that ordinary
+snapshots expire after 14 days unless snapshots are disabled or refreshed.
 Persistent data should live under `/home/user`, readable by the sandbox user. Do
-not exclude BB's files or checkout with `.boxignore`. Delete-on-stop retention is
+not exclude BB's files or checkout with `.boatignore`. Delete-on-stop retention is
 incompatible and is rejected during preflight and suspension.
 
 Machines are **ephemeral**, matching Modal: BB may remove them after their last
@@ -184,9 +185,9 @@ bb boat inspect <machine-id> --json
 bb boat allocations --json
 ```
 
-Boat offers no create idempotency key. An allocation intent is persisted before
-creation, and the first JSONL `created` ID is saved before enrollment. A retry
-reuses that ID. Every sandbox is created with a `BB_BOAT_ALLOCATION_KEY`
+The Boat CLI offers no create idempotency key (unlike its REST API, which supports `Idempotency-Key`).
+An allocation intent is persisted before creation, and the first JSONL `created` ID is saved before
+enrollment. A retry reuses that ID. Every sandbox is created with a `BB_BOAT_ALLOCATION_KEY`
 environment marker; when Boat's create call fails without returning an ID (its
 CLI has been seen to time out client-side while the sandbox was still created),
 the plugin looks for the single new sandbox carrying this key, verifies the
